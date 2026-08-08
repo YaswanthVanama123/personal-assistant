@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 from urllib.parse import quote_plus
 
-from . import mac
+from . import config, mac
 from .mcp import registry
 from .mcp import tools as _tools  # noqa: F401  (registers every tool)
 
@@ -643,11 +643,43 @@ def parse(said: str) -> tuple[str, dict] | None:
     return entry.tool, args
 
 
-def interpret(said: str) -> Outcome:
+def _fallback(said: str, on_tool=None) -> Outcome | None:
+    """Hand an unmatched utterance to a model, if one is configured.
+
+    Returns None when no fallback is set up, so the caller shows suggestions.
+    """
+    backend = str(config.load().get("brain.fallback", "none")).lower()
+    if backend in ("", "none"):
+        return None
+
+    if backend == "ollama":
+        from . import brain as local_brain
+
+        reply = local_brain.Brain().ask(said, on_tool=on_tool)
+        if reply.error:
+            return Outcome(True, f"(local model) {reply.error}", "brain")
+        return Outcome(True, reply.text, "brain")
+
+    if backend == "claude":
+        from . import agent
+
+        turn = agent.one_shot(said)
+        if turn.error:
+            return Outcome(True, f"(claude) {turn.error}", "brain")
+        return Outcome(True, turn.reply, "brain")
+
+    return Outcome(True, f"unknown brain.fallback: {backend!r}", "brain")
+
+
+def interpret(said: str, on_tool=None) -> Outcome:
     """Match one utterance against the rule table and run it."""
     hit = match_rule(said)
     if hit is None:
-        return Outcome(False, _suggest(normalise(said))) if normalise(said) else Outcome(False, "")
+        text = normalise(said)
+        if not text:
+            return Outcome(False, "")
+        handled = _fallback(said, on_tool=on_tool)
+        return handled if handled is not None else Outcome(False, _suggest(text))
 
     entry, found = hit
     if entry.answer is not None:
@@ -709,7 +741,12 @@ def human_preview(text: str) -> str:
 
 def handle(said: str, speak: bool = False) -> Outcome:
     """Interpret, confirm if needed, report."""
-    outcome = interpret(said)
+
+    def show_tool(name: str, args: dict) -> None:
+        detail = ", ".join(f"{k}={str(v)[:30]}" for k, v in args.items()) if args else ""
+        print(f"  \033[2m\u25b8 {name} {detail}\033[0m", flush=True)
+
+    outcome = interpret(said, on_tool=show_tool)
 
     if outcome.needs_confirmation:
         if not confirm_at_terminal(outcome.text):

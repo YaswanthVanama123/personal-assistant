@@ -118,6 +118,20 @@ if ! printf '%s' ":$PATH:" | grep -q ":$LINK_DIR:"; then
 fi
 
 # ---------------------------------------------------------------- done
+# ------------------------------------------------------- optional local brain
+echo
+if command -v ollama >/dev/null 2>&1; then
+  echo "✓ ollama found — local mode can fall back to a local model"
+  echo "  Enable it: set brain.fallback = \"ollama\" in $CONFIG_DIR/jeeves.toml"
+else
+  echo "· ollama not installed (optional)"
+  echo "  Without it, local mode only understands its 58 fixed phrasings."
+  echo "  For real understanding on-device — no account, no API key, no cost:"
+  echo "      brew install ollama && brew services start ollama"
+  echo "      ollama pull qwen2.5:7b"
+  echo "  then set brain.fallback = \"ollama\" in $CONFIG_DIR/jeeves.toml"
+fi
+
 echo
 echo "Setup complete. Next:"
 echo

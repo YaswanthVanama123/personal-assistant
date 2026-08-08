@@ -24,6 +24,33 @@ turn_timeout = 900
 # Extra folders Jeeves may read and write, beyond workdir.
 # extra_dirs = ["/Users/you/Documents", "/Users/you/Desktop", "/Users/you/Downloads"]
 
+[brain]
+# What handles something the command grammar has no rule for.
+#
+#   "none"    refuse and list the closest phrasings it does know (default)
+#   "ollama"  a model running on this Mac — real understanding, no account,
+#             no API key, no per-request cost, nothing leaves the machine
+#   "claude"  the agent runtime, if you have Claude Code signed in
+#
+# To use ollama:
+#     brew install ollama
+#     ollama serve                  (or: brew services start ollama)
+#     ollama pull qwen2.5:7b
+# then set fallback = "ollama" below and run `jeeves doctor`.
+fallback = "none"
+
+# qwen2.5:7b (~4.7 GB) has good tool-calling for its size and runs comfortably
+# on Apple silicon. llama3.1:8b is a fine alternative; qwen2.5:14b is better at
+# choosing tools if you have the memory.
+model = "qwen2.5:7b"
+host = "http://127.0.0.1:11434"
+timeout = 180
+
+# Expose the gated tools (send WhatsApp/iMessage/mail, shell, permanent delete)
+# to the local model. Off by default — a 7B model should not be able to reach
+# them. The confirmation prompt still applies on top when this is on.
+allow_risky = false
+
 [voice]
 # Empty uses the macOS system voice. Run `say -v '?'` for the full list.
 # Higher-quality voices: System Settings → Accessibility → Spoken Content →

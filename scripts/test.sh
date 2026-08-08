@@ -24,6 +24,8 @@ run "shell safety classifier" \
     "$PYTHON" tests/test_shell_policy.py
 run "local mode grammar (no AI)" \
     "$PYTHON" tests/test_local_grammar.py
+run "local-model brain (fake transport)" \
+    "$PYTHON" tests/test_brain.py
 run "MCP protocol over stdio" \
     "$PYTHON" tests/test_mcp_protocol.py
 

@@ -49,6 +49,21 @@ DEFAULTS: dict[str, Any] = {
         # Extra directories the agent may touch, beyond workdir.
         "extra_dirs": [str(HOME / "Documents"), str(HOME / "Desktop"), str(HOME / "Downloads")],
     },
+    "brain": {
+        # What handles an utterance the command grammar has no rule for.
+        #   "none"   — say so and list the closest phrasings (default)
+        #   "ollama" — a model running on this Mac: no account, no key, no cost
+        #   "claude" — the agent runtime, if you have it signed in
+        "fallback": "none",
+        # Ollama settings. qwen2.5:7b has good tool-calling for its size;
+        # llama3.1:8b and qwen2.5:14b also work. Bigger is better at tools.
+        "model": "qwen2.5:7b",
+        "host": "http://127.0.0.1:11434",
+        "timeout": 180,
+        # Expose the gated tools (send messages, shell, delete) to the local
+        # model. Off by default: a small model should not be able to reach them.
+        "allow_risky": False,
+    },
     "voice": {
         # Empty string = the macOS system voice. Set a name from `say -v '?'`
         # (e.g. "Samantha", or a downloaded premium voice) to override.
@@ -91,6 +106,9 @@ _ENV_MAP = {
     "JEEVES_PORT": ("server", "port", int),
     "JEEVES_TOKEN": ("server", "token", str),
     "JEEVES_SAFETY": ("safety", "mode", str),
+    "JEEVES_BRAIN": ("brain", "fallback", str),
+    "JEEVES_BRAIN_MODEL": ("brain", "model", str),
+    "JEEVES_BRAIN_HOST": ("brain", "host", str),
 }
 
 

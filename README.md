@@ -66,6 +66,54 @@ jeeves local "battery level"
 
 Add a phrasing by appending one line to `RULES` in `src/jeeves/local.py`.
 
+### When the grammar misses
+
+Local mode normalises what you say before matching — politeness stripped
+("can you please", "hey jeeves"), trailing filler dropped ("now", "today"),
+contractions tried both ways, missing apostrophes restored ("whats" → "what's"),
+synonyms mapped ("launch" → "open"). So these all work despite not being in the
+table verbatim:
+
+```
+Guess what time is it          →  It's 15:57 on Saturday 08 August.
+Can you please open WhatsApp   →  reads your unread chats
+What is the date today         →  Today is Saturday, 08 August 2026.
+```
+
+That is normalisation, not understanding, and it has a ceiling. For anything
+past it, set an **intelligence fallback** — a model that handles whatever the
+grammar could not:
+
+```bash
+brew install ollama && brew services start ollama
+ollama pull qwen2.5:7b
+```
+
+then in `~/.config/jeeves/jeeves.toml`:
+
+```toml
+[brain]
+fallback = "ollama"
+```
+
+Now the fast path stays fast and free, and anything unusual still gets answered:
+
+```
+"whats the time"                    →  grammar, instant, no model
+"battery level"                     →  grammar, instant, no model
+"which of my folders grew the most
+ this week and why"                 →  grammar misses → local model, with tools
+```
+
+No account, no API key, no per-request cost, nothing leaves the Mac. `fallback =
+"claude"` uses the agent runtime instead if you prefer.
+
+**The local model is not given the gated tools.** It can read, search, open apps
+and manage your calendar, but it cannot send a message, run a shell command or
+delete anything — 61 of 70 tools, with the 9 destructive ones withheld. A 7B
+model should not have that reach; `brain.allow_risky = true` changes it, and the
+confirmation prompt still applies on top.
+
 ## Why it's built this way
 
 **No Python packages.** Not "few" — none. Zero non-stdlib imports across 7,900

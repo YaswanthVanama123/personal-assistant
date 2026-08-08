@@ -373,6 +373,51 @@ def check_permissions(r: Report) -> None:
         )
 
 
+def check_brain(r: Report) -> None:
+    _section("Intelligence fallback (for phrasings the grammar misses)")
+    backend = str(config.load().get("brain.fallback", "none")).lower()
+
+    if backend in ("", "none"):
+        r.warn(
+            "no fallback configured — unmatched phrasings are refused",
+            "Local mode only understands its rule table. To handle anything else "
+            "on-device with no account or cost: brew install ollama && ollama serve "
+            "&& ollama pull qwen2.5:7b, then set brain.fallback = \"ollama\" in "
+            f"{config.CONFIG_DIR / 'jeeves.toml'}.",
+        )
+        return
+
+    if backend == "claude":
+        r.ok("fallback: claude", "unmatched phrasings go to the agent runtime")
+        return
+
+    if backend != "ollama":
+        r.bad(f"unknown brain.fallback: {backend!r}", 'Use "none", "ollama" or "claude".')
+        return
+
+    from . import brain as local_brain
+
+    model = str(config.load().get("brain.model", local_brain.DEFAULT_MODEL))
+    host = str(config.load().get("brain.host", local_brain.DEFAULT_HOST))
+    reachable, detail = local_brain.available()
+    if not reachable:
+        r.bad(
+            f"Ollama is not reachable at {host}",
+            f"Start it with `ollama serve` (or `brew services start ollama`). ({detail})",
+        )
+        return
+
+    installed = [name.strip() for name in detail.split(",")]
+    # Ollama reports "qwen2.5:7b"; a bare "qwen2.5" in config should still match.
+    if any(name == model or name.startswith(model + ":") for name in installed):
+        r.ok(f"Ollama ready with {model}", f"{len(local_brain.tool_specs())} tools offered")
+    else:
+        r.bad(
+            f"model {model!r} is not pulled",
+            f"Run:  ollama pull {model}\n     Installed: {detail}",
+        )
+
+
 def check_storage(r: Report) -> None:
     _section("Storage")
     try:
@@ -437,6 +482,7 @@ def run(skip_runtime: bool = False) -> int:
     check_native(r)
     check_permissions(r)
     check_voice(r)
+    check_brain(r)
     if skip_runtime:
         _section("Agent runtime")
         print(f" {DIM}skipped (--skip-runtime){RESET}")
