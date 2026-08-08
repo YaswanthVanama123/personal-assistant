@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>            <string>local.jeeves.native</string>
+  <key>CFBundleName</key>                  <string>Jeeves</string>
+  <key>CFBundleDisplayName</key>           <string>Jeeves</string>
+  <key>CFBundleExecutable</key>            <string>jeeves-native</string>
+  <key>CFBundlePackageType</key>           <string>APPL</string>
+  <key>CFBundleSignature</key>             <string>????</string>
+  <key>CFBundleShortVersionString</key>    <string>1.0.0</string>
+  <key>CFBundleVersion</key>               <string>1</string>
+  <key>LSMinimumSystemVersion</key>        <string>14.0</string>
+  <key>LSUIElement</key>                   <true/>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Jeeves listens to your voice commands and transcribes them on this Mac.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>Jeeves converts your spoken requests to text using on-device speech recognition.</string>
+  <key>NSCalendarsFullAccessUsageDescription</key>
+  <string>Jeeves reads your schedule and creates events when you ask it to.</string>
+  <key>NSRemindersFullAccessUsageDescription</key>
+  <string>Jeeves reads and creates reminders when you ask it to.</string>
+  <key>NSContactsUsageDescription</key>
+  <string>Jeeves looks up phone numbers and email addresses so it can message the right person.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Jeeves controls apps such as Notes, Mail and Music on your behalf.</string>
+  <key>NSDesktopFolderUsageDescription</key>
+  <string>Jeeves finds and organises files you ask it about.</string>
+  <key>NSDocumentsFolderUsageDescription</key>
+  <string>Jeeves finds and organises files you ask it about.</string>
+  <key>NSDownloadsFolderUsageDescription</key>
+  <string>Jeeves finds and organises files you ask it about.</string>
+</dict>
+</plist>

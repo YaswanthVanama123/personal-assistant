@@ -190,6 +190,24 @@ def check_native(r: Report) -> None:
             "Re-run scripts/build_native.sh.",
         )
 
+    # The helper must run from inside Jeeves.app, or TCC cannot read the usage
+    # strings and Speech Recognition kills the process instead of prompting.
+    # A symlink to the binary breaks this; the build script writes an exec shim.
+    state = mac.run([str(config.NATIVE_BIN), "audio-check"], timeout=45)
+    try:
+        inside = json.loads(state.out).get("inside_app_bundle") if state.ok else None
+    except json.JSONDecodeError:
+        inside = None
+    if inside is True:
+        r.ok("running inside Jeeves.app", "privacy prompts will be attributed correctly")
+    elif inside is False:
+        r.bad(
+            "the helper is running outside its app bundle",
+            "Voice will crash: TCC cannot read the usage strings from a bare "
+            "executable. Re-run scripts/build_native.sh, and invoke "
+            f"{config.NATIVE_BIN} rather than a symlink to it.",
+        )
+
     # OCR is testable without any privacy permission.
     probe = config.CACHE_DIR / "doctor-ocr.png"
     config.ensure_dirs()

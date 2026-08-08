@@ -305,6 +305,10 @@ func audioCheck() -> Never {
         "usage_strings_visible": (Bundle.main.infoDictionary?["NSMicrophoneUsageDescription"] != nil)
             && (Bundle.main.infoDictionary?["NSSpeechRecognitionUsageDescription"] != nil),
         "bundle_identifier": Bundle.main.bundleIdentifier ?? "none",
+        // If this is not the .app, TCC will not read the usage strings and
+        // Speech Recognition will kill the process instead of prompting.
+        "bundle_path": Bundle.main.bundlePath,
+        "inside_app_bundle": Bundle.main.bundlePath.hasSuffix(".app"),
     ]
 
     if let device = AVCaptureDevice.default(for: .audio) {

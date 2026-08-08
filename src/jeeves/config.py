@@ -29,7 +29,14 @@ DB_PATH = STATE_DIR / "jeeves.db"
 AUDIT_LOG = STATE_DIR / "audit.jsonl"
 AGENT_LOG = STATE_DIR / "agent.log"
 SCREENSHOT_DIR = CACHE_DIR / "screenshots"
-NATIVE_BIN = REPO_ROOT / "native" / "build" / "jeeves-native"
+
+# The helper lives inside an app bundle: TCC only reads usage-description strings
+# from a real Contents/Info.plist for some services (Speech Recognition among
+# them), and kills the process without one. The bare path is kept as a fallback
+# for older builds.
+_NATIVE_APP = REPO_ROOT / "native" / "build" / "Jeeves.app" / "Contents" / "MacOS" / "jeeves-native"
+_NATIVE_BARE = REPO_ROOT / "native" / "build" / "jeeves-native"
+NATIVE_BIN = _NATIVE_APP if _NATIVE_APP.exists() else _NATIVE_BARE
 
 DEFAULTS: dict[str, Any] = {
     "agent": {

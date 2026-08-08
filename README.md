@@ -258,6 +258,7 @@ An update that moves things can break them — the tools say so and point you at
 bin/jeeves                 launcher (finds a suitable python, sets PYTHONPATH)
 config/jeeves.toml         documented defaults
 native/main.swift          Speech, Vision, EventKit, Contacts, menu bar
+native/build/Jeeves.app    the signed app bundle TCC reads permissions from
 native/Accessibility.swift UI reading and driving (WhatsApp, any app)
 scripts/install.sh         build + link + config
 scripts/build_native.sh    compile and sign for this architecture
