@@ -154,6 +154,7 @@ final class Listener: NSObject {
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
     private var transcript = ""
+    private var failure: Error?
     private var lastChange = Date()
     private let silenceLimit: TimeInterval
     private let hardLimit: TimeInterval
@@ -171,19 +172,27 @@ final class Listener: NSObject {
                 done(status == .authorized, nil)
             }
         }
-        guard speechOK else {
+        guard speechOK, SFSpeechRecognizer.authorizationStatus() == .authorized else {
             fail("speech recognition was not authorised. Grant Speech Recognition to your terminal in System Settings → Privacy & Security.", code: 77)
         }
 
         let (micOK, _) = awaitAuth { done in
             AVCaptureDevice.requestAccess(for: .audio) { ok in done(ok, nil) }
         }
-        guard micOK else {
+        // Re-read the status: requestAccess reports the answer, but on a fresh
+        // machine the prompt may have been dismissed or denied.
+        guard micOK, AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
             fail("microphone access was denied. Grant Microphone to your terminal in System Settings → Privacy & Security.", code: 77)
         }
 
         guard let recognizer, recognizer.isAvailable else {
             fail("no speech recogniser is available for en-US", code: 78)
+        }
+
+        // There must actually be an input device. Without this check the engine
+        // hands back a zero format below.
+        guard AVCaptureDevice.default(for: .audio) != nil else {
+            fail("no audio input device is available on this Mac", code: 79)
         }
 
         let request = SFSpeechAudioBufferRecognitionRequest()
@@ -192,9 +201,20 @@ final class Listener: NSObject {
         request.requiresOnDeviceRecognition = recognizer.supportsOnDeviceRecognition
         self.request = request
 
+        // AVAudioEngine aborts the whole process — SIGABRT, via an Objective-C
+        // exception Swift cannot catch — if installTap gets a format that does
+        // not match the hardware. So validate rather than try to recover.
+        // inputFormat is the hardware's own format, which is what the tap wants.
         let input = engine.inputNode
-        let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0 else { fail("no usable audio input device", code: 79) }
+        let format = input.inputFormat(forBus: 0)
+        guard format.sampleRate > 0, format.channelCount > 0 else {
+            fail(
+                "the audio input is not usable (sample rate \(format.sampleRate), "
+                + "\(format.channelCount) channel(s)). Check System Settings → Sound → "
+                + "Input, and that no other app has exclusive use of the microphone.",
+                code: 79
+            )
+        }
 
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
             request.append(buffer)
@@ -210,7 +230,11 @@ final class Listener: NSObject {
                 }
                 if result.isFinal { self.done.signal() }
             }
-            if error != nil { self.done.signal() }
+            if let error {
+                // Keep the reason: a silent early exit here is impossible to debug.
+                self.failure = error
+                self.done.signal()
+            }
         }
 
         engine.prepare()
@@ -238,7 +262,86 @@ final class Listener: NSObject {
         engine.stop()
         request.endAudio()
         task?.cancel()
-        return transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let heard = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        if heard.isEmpty, let failure {
+            let ns = failure as NSError
+            // 1110 is "no speech detected", which is a normal empty result.
+            if ns.code == 1110 {
+                return ""
+            }
+            // kLSRErrorDomain 201 means Dictation is switched off. It is by far
+            // the most common reason speech fails on an otherwise healthy Mac, and
+            // the generic message ("Siri and Dictation are disabled") does not say
+            // where to fix it.
+            if ns.domain == "kLSRErrorDomain", ns.code == 201 {
+                fail(
+                    "Dictation is turned off, so on-device speech recognition cannot "
+                    + "run. Turn it on: System Settings → Keyboard → Dictation. "
+                    + "(Siri itself is not required.) Then try again.",
+                    code: 80
+                )
+            }
+            fail(
+                "speech recognition failed: \(failure.localizedDescription) "
+                + "[\(ns.domain) \(ns.code)]. Run `jeeves-native audio-check` for "
+                + "the audio and permission state.",
+                code: 78
+            )
+        }
+        return heard
+    }
+}
+
+/// Report the audio and speech setup without recording anything.
+/// Safe to run when `listen` misbehaves — it touches no engine and no tap.
+func audioCheck() -> Never {
+    func describe(_ status: Int) -> String {
+        ["not determined", "restricted", "denied", "authorized"][safe: status] ?? "unknown"
+    }
+    var report: [String: Any] = [
+        "microphone_permission": describe(Int(AVCaptureDevice.authorizationStatus(for: .audio).rawValue)),
+        "speech_permission": describe(Int(SFSpeechRecognizer.authorizationStatus().rawValue)),
+        "usage_strings_visible": (Bundle.main.infoDictionary?["NSMicrophoneUsageDescription"] != nil)
+            && (Bundle.main.infoDictionary?["NSSpeechRecognitionUsageDescription"] != nil),
+        "bundle_identifier": Bundle.main.bundleIdentifier ?? "none",
+    ]
+
+    if let device = AVCaptureDevice.default(for: .audio) {
+        report["input_device"] = device.localizedName
+    } else {
+        report["input_device"] = "NONE — this is why listen fails"
+    }
+
+    if let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")) {
+        report["recognizer_available"] = recognizer.isAvailable
+        report["on_device_supported"] = recognizer.supportsOnDeviceRecognition
+    } else {
+        report["recognizer_available"] = false
+    }
+
+    // Dictation must be enabled for on-device recognition; when it is off the
+    // recogniser reports itself available and then fails on first use.
+    let hiToolbox = UserDefaults(suiteName: "com.apple.HIToolbox")
+    report["dictation_enabled"] = hiToolbox?.object(forKey: "AppleDictationAutoEnable") as? Int == 1
+    report["dictation_hint"] = "if false: System Settings → Keyboard → Dictation"
+
+    // Reading the format is safe; installing a tap with a bad one is not.
+    // The engine must be held in a local — reading inputNode off a temporary
+    // crashes once ARC releases the engine underneath it.
+    let engine = AVAudioEngine()
+    let format = engine.inputNode.inputFormat(forBus: 0)
+    report["hardware_sample_rate"] = format.sampleRate
+    report["hardware_channels"] = Int(format.channelCount)
+    report["format_usable"] = format.sampleRate > 0 && format.channelCount > 0
+
+    emit(report)
+    exit(0)
+}
+
+extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
     }
 }
 
@@ -571,91 +674,110 @@ func runMenuBar(cli: String) -> Never {
 
 let args = Array(CommandLine.arguments.dropFirst())
 guard let command = args.first else {
-    fail("usage: jeeves-native <ocr|listen|brightness|events|add-event|reminders|add-reminder|complete-reminder|contacts|bar> [args]")
+    fail("usage: jeeves-native <ocr|listen|audio-check|brightness|events|add-event|reminders|add-reminder|complete-reminder|contacts|ui-dump|ui-type|wa-chats|wa-unread|wa-read|wa-send|bar> [args]")
 }
 let rest = Array(args.dropFirst())
 
-switch command {
-case "ocr":
-    guard let path = rest.first else { fail("usage: ocr <image> [--fast]") }
-    runOCR(path: path, fast: rest.contains("--fast"))
+/// Run one command. Every branch ends in exit(), so this never returns.
+func dispatch(_ command: String, _ rest: [String]) -> Never {
+    switch command {
+    case "ocr":
+        guard let path = rest.first else { fail("usage: ocr <image> [--fast]") }
+        runOCR(path: path, fast: rest.contains("--fast"))
 
-case "listen":
-    var silence = 1.4
-    var timeout = 30.0
-    for (i, a) in rest.enumerated() {
-        if a == "--silence", i + 1 < rest.count { silence = Double(rest[i + 1]) ?? silence }
-        if a == "--timeout", i + 1 < rest.count { timeout = Double(rest[i + 1]) ?? timeout }
+    case "listen":
+        var silence = 1.4
+        var timeout = 30.0
+        for (i, a) in rest.enumerated() {
+            if a == "--silence", i + 1 < rest.count { silence = Double(rest[i + 1]) ?? silence }
+            if a == "--timeout", i + 1 < rest.count { timeout = Double(rest[i + 1]) ?? timeout }
+        }
+        // Held in a local so ARC keeps the watchdog's `weak self` alive.
+        let listener = Listener(silence: silence, timeout: timeout)
+        let text = listener.listen()
+        print(text)
+        exit(text.isEmpty ? 3 : 0)
+
+    case "audio-check":
+        audioCheck()
+
+    case "brightness":
+        guard let raw = rest.first, let level = Double(raw) else {
+            fail("usage: brightness <0.0-1.0>")
+        }
+        setBrightness(level)
+
+    case "events":
+        listEvents(days: Int(rest.first ?? "1") ?? 1)
+
+    case "add-event":
+        guard let payload = rest.first else { fail("usage: add-event <json>") }
+        addEvent(payload)
+
+    case "reminders":
+        listReminders()
+
+    case "add-reminder":
+        guard let payload = rest.first else { fail("usage: add-reminder <json>") }
+        addReminder(payload)
+
+    case "complete-reminder":
+        guard let id = rest.first else { fail("usage: complete-reminder <id>") }
+        completeReminder(id)
+
+    case "contacts":
+        guard let query = rest.first else { fail("usage: contacts <name>") }
+        findContacts(query)
+
+    // Accessibility: reading and driving apps that have no AppleScript API.
+    case "ui-dump":
+        guard let app = rest.first else { fail("usage: ui-dump <app> [--max N] [--roles]") }
+        var limit = 400
+        for (i, a) in rest.enumerated() where a == "--max" && i + 1 < rest.count {
+            limit = Int(rest[i + 1]) ?? limit
+        }
+        uiDump(app: app, limit: limit, showRoles: rest.contains("--roles"))
+
+    case "ui-type":
+        guard let text = rest.first else { fail("usage: ui-type <text>") }
+        uiType(text)
+
+    case "wa-chats":
+        waChats()
+
+    case "wa-unread":
+        waUnread()
+
+    case "wa-read":
+        var limit = 40
+        for (i, a) in rest.enumerated() where a == "--max" && i + 1 < rest.count {
+            limit = Int(rest[i + 1]) ?? limit
+        }
+        waRead(chat: rest.first.map { $0.hasPrefix("--") ? "" : $0 } ?? "", limit: limit)
+
+    case "wa-send":
+        guard rest.count >= 2 else { fail("usage: wa-send <chat> <text>") }
+        waSend(chat: rest[0], text: rest[1])
+
+    default:
+        fail("unknown command: \(command)")
     }
-    // Held in a local so ARC keeps the watchdog's `weak self` alive for the call.
-    let listener = Listener(silence: silence, timeout: timeout)
-    let text = listener.listen()
-    print(text)
-    exit(text.isEmpty ? 3 : 0)
-
-case "brightness":
-    guard let raw = rest.first, let level = Double(raw) else {
-        fail("usage: brightness <0.0-1.0>")
-    }
-    setBrightness(level)
-
-case "events":
-    listEvents(days: Int(rest.first ?? "1") ?? 1)
-
-case "add-event":
-    guard let payload = rest.first else { fail("usage: add-event <json>") }
-    addEvent(payload)
-
-case "reminders":
-    listReminders()
-
-case "add-reminder":
-    guard let payload = rest.first else { fail("usage: add-reminder <json>") }
-    addReminder(payload)
-
-case "complete-reminder":
-    guard let id = rest.first else { fail("usage: complete-reminder <id>") }
-    completeReminder(id)
-
-case "contacts":
-    guard let query = rest.first else { fail("usage: contacts <name>") }
-    findContacts(query)
-
-// ---- Accessibility: reading and driving apps that have no AppleScript API.
-// All local: no network, no model, no API key. See Accessibility.swift.
-
-case "ui-dump":
-    guard let app = rest.first else { fail("usage: ui-dump <app> [--max N] [--roles]") }
-    var limit = 400
-    for (i, a) in rest.enumerated() where a == "--max" && i + 1 < rest.count {
-        limit = Int(rest[i + 1]) ?? limit
-    }
-    uiDump(app: app, limit: limit, showRoles: rest.contains("--roles"))
-
-case "ui-type":
-    guard let text = rest.first else { fail("usage: ui-type <text>") }
-    uiType(text)
-
-case "wa-chats":
-    waChats()
-
-case "wa-unread":
-    waUnread()
-
-case "wa-read":
-    var limit = 40
-    for (i, a) in rest.enumerated() where a == "--max" && i + 1 < rest.count {
-        limit = Int(rest[i + 1]) ?? limit
-    }
-    waRead(chat: rest.first.map { $0.hasPrefix("--") ? "" : $0 } ?? "", limit: limit)
-
-case "wa-send":
-    guard rest.count >= 2 else { fail("usage: wa-send <chat> <text>") }
-    waSend(chat: rest[0], text: rest[1])
-
-case "bar":
-    runMenuBar(cli: rest.first ?? NSString(string: "~/Documents/jeeves/bin/jeeves").expandingTildeInPath)
-
-default:
-    fail("unknown command: \(command)")
 }
+
+if command == "bar" {
+    // The menu bar owns the main thread and runs its own NSApplication loop.
+    runMenuBar(cli: rest.first ?? NSString(string: "~/Documents/jeeves/bin/jeeves").expandingTildeInPath)
+}
+
+// Every other command runs on a background thread while the main thread services
+// the run loop.
+//
+// This matters more than it looks. Several commands request a privacy permission,
+// and macOS can only present that prompt from a live main run loop. An earlier
+// version blocked the main thread on a semaphore waiting for the answer, so the
+// prompt could never appear: on a Mac where permission was already granted it
+// worked, and on a fresh one TCC killed the process with SIGABRT.
+DispatchQueue.global(qos: .userInitiated).async {
+    dispatch(command, rest)
+}
+RunLoop.main.run()

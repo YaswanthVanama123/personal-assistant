@@ -16,6 +16,9 @@ from . import agent, config, mac
 # Exit codes from `jeeves-native listen`
 NO_SPEECH = 3
 PERMISSION = 77
+RECOGNITION_FAILED = 78
+NO_AUDIO_DEVICE = 79
+DICTATION_OFF = 80
 
 STOP_WORDS = {"stop", "quit", "exit", "goodbye", "good bye", "that's all", "thanks jeeves"}
 
@@ -59,8 +62,26 @@ def listen(silence: float, timeout: float = 30.0) -> str | None:
     )
     if result.code == PERMISSION:
         raise PermissionError(result.err or "microphone or speech permission denied")
+    if result.code == DICTATION_OFF:
+        raise RuntimeError(
+            result.err
+            or "Dictation is off. Turn it on in System Settings → Keyboard → Dictation."
+        )
+    if result.code in (RECOGNITION_FAILED, NO_AUDIO_DEVICE):
+        raise RuntimeError(
+            (result.err or "speech recognition failed")
+            + "\nRun `./native/build/jeeves-native audio-check` for the full state."
+        )
     if result.code == NO_SPEECH or not result.out.strip():
         return None
+    if result.code < 0 or result.code == 134:
+        # SIGABRT or another signal: the helper was killed rather than exiting.
+        raise RuntimeError(
+            "the speech helper was terminated by the system (signal "
+            f"{abs(result.code)}). This usually means a macOS privacy prompt could "
+            "not be shown. Run `./native/build/jeeves-native audio-check`, grant "
+            "Microphone and Speech Recognition, then retry."
+        )
     if not result.ok:
         raise RuntimeError(result.err or "speech recognition failed")
     return result.out.strip()
@@ -140,16 +161,29 @@ class Voice:
             return 1
 
         mac.speak("At your service.", blocking=True)
+        consecutive_failures = 0
         try:
             while True:
                 print("Listening…", flush=True)
                 try:
                     said = listen(self.silence)
+                    consecutive_failures = 0
                 except PermissionError as exc:
                     print(f"✗ {exc}", file=sys.stderr)
                     return 1
                 except RuntimeError as exc:
+                    # Retry a couple of times for transient audio glitches, but
+                    # give up on anything that looks permanent rather than
+                    # printing the same error forever.
+                    consecutive_failures += 1
                     print(f"✗ {exc}", file=sys.stderr)
+                    if consecutive_failures >= 3:
+                        print(
+                            "Giving up after 3 consecutive failures — this looks "
+                            "like a configuration problem rather than a glitch.",
+                            file=sys.stderr,
+                        )
+                        return 1
                     time.sleep(1)
                     continue
                 if not said:

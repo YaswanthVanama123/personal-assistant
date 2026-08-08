@@ -287,10 +287,49 @@ def check_permissions(r: Report) -> None:
         else:
             r.warn(f"{label} check failed", result.err[:140] or "unknown error")
 
-    r.ok(
-        "Microphone and Speech Recognition",
-        "not testable without speaking — `jeeves voice --once` will prompt on first use",
-    )
+    # Voice: check everything except actually speaking.
+    import json as _json
+
+    audio = mac.run([str(config.NATIVE_BIN), "audio-check"], timeout=45)
+    try:
+        state = _json.loads(audio.out) if audio.ok else {}
+    except _json.JSONDecodeError:
+        state = {}
+
+    if not state:
+        r.warn("voice input not checked", audio.err[:140] or "audio-check produced no output")
+        return
+
+    for key, label, fix in (
+        ("microphone_permission", "Microphone",
+         f"Grant Microphone to jeeves-native under {PRIVACY} → Microphone."),
+        ("speech_permission", "Speech Recognition",
+         f"Grant Speech Recognition under {PRIVACY} → Speech Recognition."),
+    ):
+        if state.get(key) == "authorized":
+            r.ok(label, "granted")
+        else:
+            r.warn(f"{label} is {state.get(key, 'unknown')}", fix)
+
+    if state.get("dictation_enabled"):
+        r.ok("Dictation", "on-device speech recognition can run")
+    else:
+        r.warn(
+            "Dictation is off — voice modes will not work",
+            "On-device speech recognition needs it. Turn it on: System Settings → "
+            "Keyboard → Dictation. Siri itself is not required.",
+        )
+
+    if state.get("format_usable"):
+        r.ok(
+            "Audio input",
+            f"{state.get('input_device')} at {state.get('hardware_sample_rate')} Hz",
+        )
+    else:
+        r.warn(
+            "no usable audio input",
+            f"device: {state.get('input_device')}. Check System Settings → Sound → Input.",
+        )
 
 
 def check_storage(r: Report) -> None:
