@@ -338,6 +338,29 @@ def check_permissions(r: Report) -> None:
             "Keyboard → Dictation. Siri itself is not required.",
         )
 
+    # The real test: run the full speech path and confirm it cannot be killed.
+    # A SIGABRT here means TCC attribution has regressed.
+    probe = mac.run([str(config.NATIVE_BIN), "listen", "--timeout", "2"], timeout=180)
+    if probe.code < 0 or probe.code == 134:
+        r.bad(
+            "the speech helper was killed by the system",
+            "TCC attribution has regressed — the helper must run as Jeeves.app via "
+            "LaunchServices so it is its own responsible process. Re-run "
+            "scripts/build_native.sh.",
+        )
+    elif probe.code == 80:
+        pass  # already reported as "Dictation is off" above
+    elif probe.code == 77:
+        r.warn(
+            "speech or microphone permission not granted yet",
+            "Run `jeeves local --voice` once and approve the prompt. It is "
+            f"attributed to “Jeeves”, not your terminal. ({probe.err[:100]})",
+        )
+    elif probe.code in (0, 3):
+        r.ok("speech path runs end to end", "no crash; prompt/grant handled correctly")
+    else:
+        r.warn(f"speech path returned {probe.code}", probe.err[:160] or "no detail")
+
     if state.get("format_usable"):
         r.ok(
             "Audio input",

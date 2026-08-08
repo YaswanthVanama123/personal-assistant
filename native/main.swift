@@ -61,6 +61,95 @@ func awaitAuth(_ request: @escaping (@escaping (Bool, Error?) -> Void) -> Void) 
     return (granted, failure)
 }
 
+// MARK: - TCC responsibility
+
+// The privacy system attributes a request to the *responsible* process, not the
+// one that made the call. A binary exec'd from a shell inherits the terminal as
+// its responsible process, so TCC looks for the usage-description string in
+// Terminal's Info.plist — never finds NSSpeechRecognitionUsageDescription there —
+// and kills the process with a message claiming *our* plist lacks the key:
+//
+//   my pid: 37545, responsible pid: 1529
+//   responsible process: /System/Applications/Utilities/Terminal.app/…/Terminal
+//
+// The fix is to re-exec ourselves having disclaimed the parent's responsibility.
+// The new image is its own responsible process, so TCC reads Jeeves.app's
+// Info.plist and prompts properly.
+
+let DISCLAIM_ENV = "JEEVES_TCC_DISCLAIMED"
+
+func responsiblePID(_ pid: pid_t = getpid()) -> pid_t {
+    guard let handle = dlopen(nil, RTLD_LAZY),
+          let symbol = dlsym(handle, "responsibility_get_pid_responsible_for_pid")
+    else { return pid }
+    typealias Fn = @convention(c) (pid_t) -> pid_t
+    return unsafeBitCast(symbol, to: Fn.self)(pid)
+}
+
+func processPath(_ pid: pid_t) -> String {
+    var buffer = [CChar](repeating: 0, count: 4096)
+    guard proc_pidpath(pid, &buffer, 4096) > 0 else { return "unknown" }
+    return String(cString: buffer)
+}
+
+private func withCStrings<R>(
+    _ strings: [String],
+    _ body: (UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> R
+) -> R {
+    var pointers: [UnsafeMutablePointer<CChar>?] = strings.map { strdup($0) }
+    pointers.append(nil)
+    defer { for pointer in pointers where pointer != nil { free(pointer) } }
+    return pointers.withUnsafeMutableBufferPointer { body($0.baseAddress!) }
+}
+
+/// Re-run ourselves so that TCC treats this process, not the terminal, as
+/// responsible for privacy requests.
+///
+/// A child is spawned with the parent's responsibility disclaimed. File
+/// descriptors are inherited, so the child writes straight to our stdout and
+/// stderr; we simply wait and exit with its status. (An earlier version used
+/// POSIX_SPAWN_SETEXEC to replace the image in place, but the disclaim call and
+/// `posix_spawnattr_setflags` fought over the same flags field, leaving both
+/// parent and child running and printing everything twice.)
+///
+/// Returns only if the respawn could not be attempted, in which case the caller
+/// carries on inline and the normal error path reports whatever happens.
+func becomeOwnResponsibleProcess() {
+    if ProcessInfo.processInfo.environment[DISCLAIM_ENV] != nil { return }
+    if responsiblePID() == getpid() { return }  // already responsible, e.g. via `open`
+
+    var attributes: posix_spawnattr_t?
+    guard posix_spawnattr_init(&attributes) == 0 else { return }
+    defer { posix_spawnattr_destroy(&attributes) }
+
+    guard let handle = dlopen(nil, RTLD_LAZY),
+          let symbol = dlsym(handle, "responsibility_spawnattrs_setdisclaim")
+    else { return }
+    typealias Disclaim = @convention(c) (UnsafeMutablePointer<posix_spawnattr_t?>, Int32) -> Int32
+    guard unsafeBitCast(symbol, to: Disclaim.self)(&attributes, 1) == 0 else { return }
+
+    // Must be the real path inside the bundle, or the child loses the bundle
+    // identity that carries the usage strings.
+    let executable = Bundle.main.executablePath ?? CommandLine.arguments[0]
+    var environment = ProcessInfo.processInfo.environment
+    environment[DISCLAIM_ENV] = "1"
+
+    var child: pid_t = 0
+    let spawned = withCStrings([executable] + CommandLine.arguments.dropFirst()) { argv in
+        withCStrings(environment.map { "\($0.key)=\($0.value)" }) { envp in
+            posix_spawn(&child, executable, &attributes, nil, argv, envp)
+        }
+    }
+    guard spawned == 0, child > 0 else { return }  // fall back to running inline
+
+    var status: Int32 = 0
+    while waitpid(child, &status, 0) == -1 && errno == EINTR { continue }
+    if status & 0x7f == 0 {
+        exit((status >> 8) & 0xff)          // exited normally
+    }
+    exit(128 + (status & 0x7f))             // killed by a signal
+}
+
 // MARK: - OCR (Vision)
 
 /// Redraw an image onto opaque white.
@@ -160,10 +249,23 @@ final class Listener: NSObject {
     private let hardLimit: TimeInterval
     private let done = DispatchSemaphore(value: 0)
 
-    init(silence: TimeInterval, timeout: TimeInterval) {
+    /// When reportTo is set, failures are written there as JSON rather than to
+    /// stderr, because a LaunchServices-launched instance has nowhere to print.
+    private let reportTo: String?
+
+    init(silence: TimeInterval, timeout: TimeInterval, reportTo: String? = nil) {
         self.silenceLimit = silence
         self.hardLimit = timeout
+        self.reportTo = reportTo
         super.init()
+    }
+
+    private func giveUp(_ message: String, code: Int32) -> Never {
+        if let reportTo {
+            writeListenResult(reportTo, ["error": message, "code": Int(code)])
+            exit(0)
+        }
+        fail(message, code: code)
     }
 
     func listen() -> String {
@@ -173,7 +275,7 @@ final class Listener: NSObject {
             }
         }
         guard speechOK, SFSpeechRecognizer.authorizationStatus() == .authorized else {
-            fail("speech recognition was not authorised. Grant Speech Recognition to your terminal in System Settings → Privacy & Security.", code: 77)
+            giveUp("speech recognition was not authorised. Approve the prompt, or grant Speech Recognition to Jeeves under System Settings → Privacy & Security.", code: 77)
         }
 
         let (micOK, _) = awaitAuth { done in
@@ -182,17 +284,17 @@ final class Listener: NSObject {
         // Re-read the status: requestAccess reports the answer, but on a fresh
         // machine the prompt may have been dismissed or denied.
         guard micOK, AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
-            fail("microphone access was denied. Grant Microphone to your terminal in System Settings → Privacy & Security.", code: 77)
+            giveUp("microphone access was denied. Approve the prompt, or grant Microphone to Jeeves under System Settings → Privacy & Security.", code: 77)
         }
 
         guard let recognizer, recognizer.isAvailable else {
-            fail("no speech recogniser is available for en-US", code: 78)
+            giveUp("no speech recogniser is available for en-US", code: 78)
         }
 
         // There must actually be an input device. Without this check the engine
         // hands back a zero format below.
         guard AVCaptureDevice.default(for: .audio) != nil else {
-            fail("no audio input device is available on this Mac", code: 79)
+            giveUp("no audio input device is available on this Mac", code: 79)
         }
 
         let request = SFSpeechAudioBufferRecognitionRequest()
@@ -208,7 +310,7 @@ final class Listener: NSObject {
         let input = engine.inputNode
         let format = input.inputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else {
-            fail(
+            giveUp(
                 "the audio input is not usable (sample rate \(format.sampleRate), "
                 + "\(format.channelCount) channel(s)). Check System Settings → Sound → "
                 + "Input, and that no other app has exclusive use of the microphone.",
@@ -275,14 +377,14 @@ final class Listener: NSObject {
             // the generic message ("Siri and Dictation are disabled") does not say
             // where to fix it.
             if ns.domain == "kLSRErrorDomain", ns.code == 201 {
-                fail(
+                giveUp(
                     "Dictation is turned off, so on-device speech recognition cannot "
                     + "run. Turn it on: System Settings → Keyboard → Dictation. "
                     + "(Siri itself is not required.) Then try again.",
                     code: 80
                 )
             }
-            fail(
+            giveUp(
                 "speech recognition failed: \(failure.localizedDescription) "
                 + "[\(ns.domain) \(ns.code)]. Run `jeeves-native audio-check` for "
                 + "the audio and permission state.",
@@ -308,6 +410,10 @@ func audioCheck() -> Never {
         // If this is not the .app, TCC will not read the usage strings and
         // Speech Recognition will kill the process instead of prompting.
         "bundle_path": Bundle.main.bundlePath,
+        // If this is not our own pid, TCC reads the *other* process's
+        // Info.plist and will kill us for a "missing" usage string.
+        "responsible_pid_is_self": responsiblePID() == getpid(),
+        "responsible_process": processPath(responsiblePID()),
         "inside_app_bundle": Bundle.main.bundlePath.hasSuffix(".app"),
     ]
 
@@ -347,6 +453,159 @@ extension Array {
     subscript(safe index: Int) -> Element? {
         indices.contains(index) ? self[index] : nil
     }
+}
+
+/// Host for `listen`.
+///
+/// Two things are required before Speech Recognition can be requested, and a
+/// terminal-launched process has neither:
+///
+///  1. **Its own TCC responsibility.** macOS attributes a privacy request to the
+///     *responsible* process. A binary exec'd from a shell inherits the terminal,
+///     so TCC looks for NSSpeechRecognitionUsageDescription in Terminal's
+///     Info.plist, does not find it, and kills us — while reporting that *our*
+///     plist lacks the key. `responsibility_spawnattrs_setdisclaim` returns
+///     success but does not actually move responsibility here, so the reliable
+///     route is to relaunch through LaunchServices: an app opened by launchd is
+///     its own responsible process.
+///
+///  2. **A real NSApplication.** A prompt can only be presented to a process the
+///     window server knows about; `RunLoop.main.run()` is not enough.
+///
+/// So `listen` from a terminal relaunches Jeeves.app via `open`, and that
+/// instance writes its result to a JSON file the CLI polls for.
+final class ListenApp: NSObject, NSApplicationDelegate {
+    private let silence: TimeInterval
+    private let timeout: TimeInterval
+    private let outputPath: String?
+
+    init(silence: TimeInterval, timeout: TimeInterval, outputPath: String?) {
+        self.silence = silence
+        self.timeout = timeout
+        self.outputPath = outputPath
+        super.init()
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        DispatchQueue.global(qos: .userInitiated).async { [silence, timeout, outputPath] in
+            guard let outputPath else {
+                let listener = Listener(silence: silence, timeout: timeout)
+                let text = listener.listen()
+                print(text)
+                exit(text.isEmpty ? 3 : 0)
+            }
+            // Detached instance: report through the file, never stdout.
+            let listener = Listener(silence: silence, timeout: timeout, reportTo: outputPath)
+            let text = listener.listen()
+            writeListenResult(outputPath, ["text": text, "code": text.isEmpty ? 3 : 0])
+            exit(0)
+        }
+    }
+}
+
+func writeListenResult(_ path: String, _ payload: [String: Any]) {
+    var body = payload
+    body["responsible_pid_is_self"] = responsiblePID() == getpid()
+    body["responsible_process"] = processPath(responsiblePID())
+    guard let data = try? JSONSerialization.data(withJSONObject: body) else { return }
+    // Write then rename, so the poller never sees a half-written file.
+    let temporary = path + ".partial"
+    try? data.write(to: URL(fileURLWithPath: temporary))
+    try? FileManager.default.moveItem(
+        at: URL(fileURLWithPath: temporary), to: URL(fileURLWithPath: path))
+}
+
+/// Run the listener inside a proper application process.
+func runListenAsApp(silence: TimeInterval, timeout: TimeInterval, outputPath: String?) -> Never {
+    let app = NSApplication.shared
+    let delegate = ListenApp(silence: silence, timeout: timeout, outputPath: outputPath)
+    app.delegate = delegate
+    app.setActivationPolicy(.accessory)
+    app.run()
+    exit(0)
+}
+
+/// Where the CLI leaves a request for the app instance to pick up.
+///
+/// LaunchServices does not forward `open --args` to the process in a way we can
+/// rely on — argv arrives containing only the executable path — so the request
+/// travels through a file instead. That also keeps the app instance completely
+/// independent of how it was started.
+let listenRequestPath: String = {
+    let dir = NSHomeDirectory() + "/Library/Caches/jeeves"
+    try? FileManager.default.createDirectory(
+        atPath: dir, withIntermediateDirectories: true)
+    return dir + "/listen-request.json"
+}()
+
+/// Relaunch through LaunchServices and wait for the transcript.
+///
+/// An app opened by launchd is its own TCC-responsible process, which is the
+/// whole point: a terminal-launched binary inherits the terminal's identity and
+/// gets killed for a usage string it does not own.
+func listenViaLaunchServices(silence: TimeInterval, timeout: TimeInterval) -> Never {
+    let bundle = Bundle.main.bundlePath
+    guard bundle.hasSuffix(".app") else {
+        fail(
+            "the helper is not running from Jeeves.app, so macOS cannot attribute "
+            + "the microphone prompt to it. Re-run scripts/build_native.sh.",
+            code: 79
+        )
+    }
+
+    let output = NSTemporaryDirectory()
+        + "jeeves-listen-\(getpid())-\(Int(Date().timeIntervalSince1970)).json"
+    try? FileManager.default.removeItem(atPath: output)
+
+    let request: [String: Any] = ["out": output, "silence": silence, "timeout": timeout]
+    guard let data = try? JSONSerialization.data(withJSONObject: request) else {
+        fail("could not build the listen request", code: 79)
+    }
+    try? data.write(to: URL(fileURLWithPath: listenRequestPath))
+
+    let open = Process()
+    open.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+    open.arguments = ["-n", "-a", bundle]
+    do { try open.run() } catch {
+        fail("could not launch \(bundle): \(error.localizedDescription)", code: 79)
+    }
+    open.waitUntilExit()
+    if open.terminationStatus != 0 {
+        fail("`open` refused to launch \(bundle) (status \(open.terminationStatus))", code: 79)
+    }
+
+    // Generous: the app instance may be showing a permission dialog.
+    let deadline = Date().addingTimeInterval(timeout + 90)
+    while Date() < deadline {
+        if let data = FileManager.default.contents(atPath: output),
+           let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            try? FileManager.default.removeItem(atPath: output)
+            if let error = parsed["error"] as? String {
+                fail(error, code: Int32(parsed["code"] as? Int ?? 78))
+            }
+            let text = parsed["text"] as? String ?? ""
+            print(text)
+            exit(Int32(parsed["code"] as? Int ?? (text.isEmpty ? 3 : 0)))
+        }
+        Thread.sleep(forTimeInterval: 0.15)
+    }
+    try? FileManager.default.removeItem(atPath: output)
+    fail(
+        "the speech helper did not report back within \(Int(timeout) + 90)s. If a "
+        + "microphone or speech permission dialog appeared, approve it and run this "
+        + "again — the grant is remembered.",
+        code: 78
+    )
+}
+
+/// Read the request the CLI left for us. Nil when launched without one.
+func pendingListenRequest() -> (out: String, silence: TimeInterval, timeout: TimeInterval)? {
+    guard let data = FileManager.default.contents(atPath: listenRequestPath),
+          let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let out = parsed["out"] as? String
+    else { return nil }
+    try? FileManager.default.removeItem(atPath: listenRequestPath)  // one-shot
+    return (out, parsed["silence"] as? Double ?? 1.4, parsed["timeout"] as? Double ?? 30)
 }
 
 // MARK: - Brightness
@@ -677,6 +936,12 @@ func runMenuBar(cli: String) -> Never {
 // MARK: - Entry point
 
 let args = Array(CommandLine.arguments.dropFirst())
+
+// Launched by LaunchServices with no arguments: pick up the request the CLI left.
+if args.isEmpty, let pending = pendingListenRequest() {
+    runListenAsApp(silence: pending.silence, timeout: pending.timeout, outputPath: pending.out)
+}
+
 guard let command = args.first else {
     fail("usage: jeeves-native <ocr|listen|audio-check|brightness|events|add-event|reminders|add-reminder|complete-reminder|contacts|ui-dump|ui-type|wa-chats|wa-unread|wa-read|wa-send|bar> [args]")
 }
@@ -690,19 +955,13 @@ func dispatch(_ command: String, _ rest: [String]) -> Never {
         runOCR(path: path, fast: rest.contains("--fast"))
 
     case "listen":
-        var silence = 1.4
-        var timeout = 30.0
-        for (i, a) in rest.enumerated() {
-            if a == "--silence", i + 1 < rest.count { silence = Double(rest[i + 1]) ?? silence }
-            if a == "--timeout", i + 1 < rest.count { timeout = Double(rest[i + 1]) ?? timeout }
-        }
-        // Held in a local so ARC keeps the watchdog's `weak self` alive.
-        let listener = Listener(silence: silence, timeout: timeout)
-        let text = listener.listen()
-        print(text)
-        exit(text.isEmpty ? 3 : 0)
+        // Handled before dispatch, because it needs its own NSApplication.
+        fail("internal: listen should have been handled earlier")
 
     case "audio-check":
+        // --disclaim proves the responsibility fix works: run it with and
+        // without the flag and compare responsible_pid_is_self.
+        if rest.contains("--disclaim") { becomeOwnResponsibleProcess() }
         audioCheck()
 
     case "brightness":
@@ -766,6 +1025,30 @@ func dispatch(_ command: String, _ rest: [String]) -> Never {
     default:
         fail("unknown command: \(command)")
     }
+}
+
+// Speech Recognition is TCC-protected, so this command has to be its own
+// responsible process and needs a real NSApplication. Both are set up here,
+// before the generic background dispatch below.
+if command == "listen" {
+    var silence = 1.4
+    var timeout = 30.0
+    var output: String?
+    for (i, a) in rest.enumerated() {
+        if a == "--silence", i + 1 < rest.count { silence = Double(rest[i + 1]) ?? silence }
+        if a == "--timeout", i + 1 < rest.count { timeout = Double(rest[i + 1]) ?? timeout }
+        if a == "--out", i + 1 < rest.count { output = rest[i + 1] }
+    }
+
+    if output != nil {
+        // Launched by LaunchServices: we are the application instance.
+        runListenAsApp(silence: silence, timeout: timeout, outputPath: output)
+    }
+    if responsiblePID() == getpid() {
+        // Already our own responsible process, so no relaunch is needed.
+        runListenAsApp(silence: silence, timeout: timeout, outputPath: nil)
+    }
+    listenViaLaunchServices(silence: silence, timeout: timeout)
 }
 
 if command == "bar" {
