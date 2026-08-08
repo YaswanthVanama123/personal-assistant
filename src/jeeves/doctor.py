@@ -251,10 +251,25 @@ def check_permissions(r: Report) -> None:
 
     if not config.NATIVE_BIN.exists():
         r.warn(
-            "Calendars, Reminders, Contacts and Microphone not checked",
+            "Calendars, Reminders, Contacts, Accessibility and Microphone not checked",
             "the native helper is not built yet",
         )
         return
+
+    # Accessibility — reading and driving apps with no AppleScript API (WhatsApp,
+    # Slack, Electron/Catalyst apps) and typing into the frontmost window.
+    ax = mac.run([str(config.NATIVE_BIN), "ui-dump", "Finder", "--max", "3"], timeout=30)
+    if ax.code == 77:
+        r.warn(
+            "Accessibility is not granted",
+            "WhatsApp, ui_read_app, ui_inspect and typing into apps will fail. "
+            f"Enable jeeves-native under {PRIVACY} → Accessibility, then restart "
+            "your terminal.",
+        )
+    elif ax.ok or ax.code == 4:
+        r.ok("Accessibility", "WhatsApp and other UI-driven apps are readable")
+    else:
+        r.warn("Accessibility check inconclusive", ax.err[:140] or "no output")
 
     for label, args, pane in (
         ("Calendars", ["events", "1"], "Calendars"),

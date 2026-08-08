@@ -621,6 +621,38 @@ case "contacts":
     guard let query = rest.first else { fail("usage: contacts <name>") }
     findContacts(query)
 
+// ---- Accessibility: reading and driving apps that have no AppleScript API.
+// All local: no network, no model, no API key. See Accessibility.swift.
+
+case "ui-dump":
+    guard let app = rest.first else { fail("usage: ui-dump <app> [--max N] [--roles]") }
+    var limit = 400
+    for (i, a) in rest.enumerated() where a == "--max" && i + 1 < rest.count {
+        limit = Int(rest[i + 1]) ?? limit
+    }
+    uiDump(app: app, limit: limit, showRoles: rest.contains("--roles"))
+
+case "ui-type":
+    guard let text = rest.first else { fail("usage: ui-type <text>") }
+    uiType(text)
+
+case "wa-chats":
+    waChats()
+
+case "wa-unread":
+    waUnread()
+
+case "wa-read":
+    var limit = 40
+    for (i, a) in rest.enumerated() where a == "--max" && i + 1 < rest.count {
+        limit = Int(rest[i + 1]) ?? limit
+    }
+    waRead(chat: rest.first.map { $0.hasPrefix("--") ? "" : $0 } ?? "", limit: limit)
+
+case "wa-send":
+    guard rest.count >= 2 else { fail("usage: wa-send <chat> <text>") }
+    waSend(chat: rest[0], text: rest[1])
+
 case "bar":
     runMenuBar(cli: rest.first ?? NSString(string: "~/Documents/jeeves/bin/jeeves").expandingTildeInPath)
 

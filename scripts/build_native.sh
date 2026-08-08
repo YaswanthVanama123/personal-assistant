@@ -43,18 +43,18 @@ cat > "$PLIST" <<'PLIST_EOF'
 </plist>
 PLIST_EOF
 
-echo "==> compiling native/Jeeves.swift"
+echo "==> compiling native/*.swift"
 # Build for whichever architecture this Mac is, so the project is portable
 # between Apple silicon and Intel machines.
 HOST_ARCH="$(uname -m)"
 swiftc \
   -O -whole-module-optimization \
   -target "${HOST_ARCH}-apple-macos14.0" \
-  -framework AppKit -framework Vision -framework EventKit \
+  -framework AppKit -framework Vision -framework EventKit -framework ApplicationServices \
   -framework Speech -framework AVFoundation -framework Contacts \
   -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$PLIST" \
   -o "$OUT" \
-  "$ROOT/native/Jeeves.swift"
+  "$ROOT/native/main.swift" "$ROOT/native/Accessibility.swift"
 
 echo "==> ad-hoc signing"
 codesign --force --sign - --identifier local.jeeves.native --timestamp=none "$OUT"

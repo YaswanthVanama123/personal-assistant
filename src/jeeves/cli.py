@@ -14,6 +14,9 @@ examples:
   jeeves ask --notify "summarise my unread mail"
   jeeves voice                           converse out loud
   jeeves voice --once                     answer a single spoken request
+  jeeves local "read my messages"         no AI at all, offline, free
+  jeeves local --voice                    offline voice assistant
+  jeeves local --list                     every phrase local mode knows
   jeeves menubar                          live in the menu bar
   jeeves serve                            start the local HTTP API
   jeeves doctor                           check permissions and wiring
@@ -57,6 +60,15 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=0, help="port (default 8787)")
 
     sub.add_parser("menubar", help="run the menu-bar app")
+
+    local = sub.add_parser(
+        "local",
+        help="no-AI mode: a fixed command grammar, fully offline",
+    )
+    local.add_argument("words", nargs="*", help="the command; omit for an interactive prompt")
+    local.add_argument("--voice", action="store_true", help="listen and reply out loud, offline")
+    local.add_argument("--speak", action="store_true", help="read answers aloud")
+    local.add_argument("--list", action="store_true", help="list every phrase it understands")
 
     doctor = sub.add_parser("doctor", help="check permissions, tools and the runtime")
     doctor.add_argument(
@@ -227,6 +239,16 @@ def main(argv: list[str] | None = None) -> int:
             return server.run(host=args.host, port=args.port)
         if command == "menubar":
             return cmd_menubar(args)
+        if command == "local":
+            from . import local as local_mode
+
+            if args.list:
+                return local_mode.list_rules()
+            if args.voice:
+                return local_mode.voice_loop()
+            if args.words:
+                return local_mode.run_once(" ".join(args.words), speak=args.speak)
+            return local_mode.repl(speak=args.speak)
         if command == "doctor":
             from . import doctor
 

@@ -22,6 +22,8 @@ run "unit checks (schemas, auth, prompt, speech shaping)" \
     "$PYTHON" tests/test_units.py
 run "shell safety classifier" \
     "$PYTHON" tests/test_shell_policy.py
+run "local mode grammar (no AI)" \
+    "$PYTHON" tests/test_local_grammar.py
 run "MCP protocol over stdio" \
     "$PYTHON" tests/test_mcp_protocol.py
 
