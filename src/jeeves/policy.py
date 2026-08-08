@@ -77,7 +77,12 @@ def settings_json() -> str:
     return json.dumps(
         {
             "permissions": {
-                "allow": [f"{t}(*)" if t.startswith("mcp__") else t for t in allowed_tools()],
+                # MCP rules are `mcp__server` for a whole server, or
+                # `mcp__server__tool` for one tool. The `Tool(argument)` matcher
+                # syntax does NOT apply to them — an invalid rule makes the whole
+                # settings document fail validation, and in headless mode that is
+                # silently ignored, which would leave every tool call unpermitted.
+                "allow": allowed_tools(),
                 "deny": deny,
             },
             "includeCoAuthoredBy": False,

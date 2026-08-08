@@ -130,6 +130,7 @@ class Agent:
         interface: str = "cli",
         extra_prompt: str = "",
         model: str = "",
+        turn_timeout: float = 0.0,
     ) -> None:
         self.cfg = config.load()
         self.voice = voice
@@ -137,6 +138,8 @@ class Agent:
         self.session_id = session_id or str(uuid.uuid4())
         self.model = model or str(self.cfg.get("agent.model") or "")
         self.extra_prompt = extra_prompt
+        # 0 means "use the configured default".
+        self.turn_timeout = turn_timeout or float(self.cfg.get("agent.turn_timeout", 900))
         self.proc: subprocess.Popen[str] | None = None
         self._selector: selectors.BaseSelector | None = None
         self._stderr_thread: threading.Thread | None = None
@@ -304,7 +307,7 @@ class Agent:
         memory.log_message(self.session_id, "user", text)
         self._write(text)
 
-        timeout = float(self.cfg.get("agent.turn_timeout", 900))
+        timeout = self.turn_timeout
         deadline = time.monotonic() + timeout
         reply_parts: list[str] = []
 
@@ -312,7 +315,16 @@ class Agent:
             try:
                 line = self._readline(deadline)
             except TimeoutError:
-                yield Event("error", text=f"timed out after {timeout:.0f}s")
+                yield Event(
+                    "error",
+                    text=(
+                        f"the agent runtime did not finish within {timeout:.0f}s.\n"
+                        f"Check {config.AGENT_LOG} — it captures everything the "
+                        "runtime prints. A first run can be slow while it starts "
+                        "the tool server; a permanent stall usually means the "
+                        "runtime is waiting for something it cannot ask for."
+                    ),
+                )
                 return
             if line is None:
                 yield Event("error", text=self._diagnose_exit())

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
+import threading
 import subprocess
 import sys
 import time
@@ -60,24 +61,57 @@ def check_runtime(r: Report) -> None:
     version = mac.run([binary, "--version"], timeout=30).out.splitlines()
     r.ok("claude found", f"{binary} — {version[0] if version else 'unknown version'}")
 
-    # Does it actually start? This is the check that catches nested sessions,
-    # auth problems and duplicate installs.
+    # Does it actually start? This is the check that catches auth problems,
+    # duplicate installs, nested sessions and unpermitted tools.
     from . import agent
 
-    print(f"     {DIM}starting a test turn…{RESET}")
+    timeout = 150
+    print(
+        f"     {DIM}running a test turn (up to {timeout}s — the first one is "
+        f"slower, it starts the tool server)…{RESET}"
+    )
+
+    started = time.monotonic()
+    stop = threading.Event()
+
+    def tick() -> None:
+        while not stop.wait(5):
+            print(
+                f"     {DIM}…still waiting ({time.monotonic() - started:.0f}s){RESET}",
+                flush=True,
+            )
+
+    heartbeat = threading.Thread(target=tick, daemon=True)
+    heartbeat.start()
+
+    saw: list[str] = []
     try:
-        probe = agent.Agent(interface="doctor")
-        turn = probe.ask("Reply with exactly: READY")
+        probe = agent.Agent(interface="doctor", turn_timeout=timeout)
+        turn = probe.ask(
+            "Reply with exactly: READY",
+            on_event=lambda e: saw.append(e.kind),
+        )
         probe.close()
     except agent.AgentError as exc:
+        stop.set()
         r.bad("the runtime could not start", str(exc))
         return
+    finally:
+        stop.set()
+
     if turn.ok and "READY" in turn.reply.upper():
         r.ok("runtime answers", f"{turn.duration_s:.1f}s, ${turn.cost_usd:.4f}")
     elif turn.ok:
         r.warn("runtime answered unexpectedly", f"got {turn.reply[:120]!r}")
     else:
-        r.bad("the runtime returned an error", turn.error)
+        hint = ""
+        if "did not finish" in turn.error and "text" not in saw:
+            hint = (
+                "\n     The runtime produced no output at all. Test it on its own "
+                "with:  claude -p 'Reply OK'\n     If that also hangs, the runtime "
+                "itself needs attention (usually sign-in) rather than Jeeves."
+            )
+        r.bad("the runtime returned an error", turn.error + hint)
 
 
 def check_tools(r: Report) -> None:
