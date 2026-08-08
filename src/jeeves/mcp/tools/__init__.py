@@ -3,6 +3,19 @@
 Order is irrelevant; each module calls @tool at import time.
 """
 
-from . import apps, comms, files, pim, screen, shell, system, whatsapp  # noqa: F401
+from . import (  # noqa: F401
+    apps,
+    browser,
+    comms,
+    files,
+    pim,
+    screen,
+    shell,
+    system,
+    whatsapp,
+)
 
-__all__ = ["apps", "comms", "files", "pim", "screen", "shell", "system", "whatsapp"]
+__all__ = [
+    "apps", "browser", "comms", "files", "pim", "screen", "shell", "system",
+    "whatsapp",
+]

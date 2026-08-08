@@ -124,12 +124,55 @@ transport = scripted(say("   "))
 reply = brain.Brain(transport=transport).ask("anything")
 check_true("empty reply is an error", not reply.ok)
 
-# ------------------------------------------------------------------- loop ceiling
+# ------------------------------------------- identical calls are refused, not run
+# This is the fix for the observed six-round quit_app and shell_check loops.
 transport = scripted(*[call("battery", {}) for _ in range(brain.MAX_TOOL_ROUNDS)])
 reply = brain.Brain(transport=transport).ask("loop forever")
-check_true("runaway loop is capped", not reply.ok)
+check_true("repeated identical call is stopped", not reply.ok)
+check_true("stopped early, not at the cap", reply.rounds < brain.MAX_TOOL_ROUNDS)
+check_true("error names the repetition", "repeating" in reply.error)
+check("the tool ran only once", reply.tools_used, ["battery"])
+
+# A *distinct* second call is allowed through.
+transport = scripted(
+    call("battery", {}),
+    call("volume_get", {}),
+    say("93 percent, volume 40."),
+)
+reply = brain.Brain(transport=transport).ask("battery and volume")
+check("distinct calls both run", reply.tools_used, ["battery", "volume_get"])
+check_true("distinct calls succeed", reply.ok)
+
+# Distinct-but-endless calls still hit the round ceiling.
+distinct = [call("list_dir", {"path": f"~/d{i}"}) for i in range(brain.MAX_TOOL_ROUNDS)]
+transport = scripted(*distinct)
+reply = brain.Brain(transport=transport).ask("walk everything")
+check_true("round ceiling still applies", not reply.ok)
 check("stopped at the cap", reply.rounds, brain.MAX_TOOL_ROUNDS)
 check_true("cap error explains itself", "rounds" in reply.error)
+
+# ------------------------------------------------ malformed arguments are rejected
+transport = scripted(
+    call("open_url", {"url": "https:"}),          # the exact broken value observed
+    call("open_url", {"url": "https://www.youtube.com"}),
+    say("Opened YouTube."),
+)
+reply = brain.Brain(transport=transport).ask("open youtube")
+check("broken URL was not executed", reply.tools_used, ["open_url"])
+check_true("rejection explained to the model",
+           "not a usable URL" in transport.sent[1]["messages"][-1]["content"])
+check_true("recovered after the rejection", reply.ok)
+
+# ------------------------------------------- confusing tools are withheld entirely
+offered = {s["function"]["name"] for s in brain.tool_specs(allow_risky=True)}
+for confusing in brain.CONFUSING_FOR_SMALL_MODELS:
+    if confusing in offered:
+        failures.append(f"  {confusing!r} should not be offered to a small model")
+
+# Browser tab tools must be available, so quit_app is never the closest match.
+for needed in ["browser_close_all_tabs", "browser_close_tab", "browser_new_tab"]:
+    if needed not in offered:
+        failures.append(f"  {needed!r} must be offered so quit_app is not substituted")
 
 # ------------------------------------------------------- gated tools are withheld
 safe = {s["function"]["name"] for s in brain.tool_specs(allow_risky=False)}

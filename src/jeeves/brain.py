@@ -17,6 +17,7 @@ change that, and the confirm gate still applies on top.
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -93,11 +94,23 @@ def available(host: str = "", timeout: float = 4.0) -> tuple[bool, str]:
         return False, str(exc)[:120]
 
 
+# Tools that reliably send a small model in circles. Each of these was observed
+# being called repeatedly instead of doing the obvious thing:
+#
+#   shell_check  only useful to something that can then run shell, which the
+#                local model cannot — it looped building half-formed commands
+#   ui_inspect   an accessibility-tree debugging dump; looped on WhatsApp
+#   audit_trail  meta-introspection, never what the user asked for
+CONFUSING_FOR_SMALL_MODELS = {"shell_check", "ui_inspect", "audit_trail"}
+
+
 def tool_specs(allow_risky: bool = False, only: list[str] | None = None) -> list[dict]:
     """The tool catalogue in the function-calling shape Ollama expects."""
     specs: list[dict] = []
     for name, spec in sorted(registry.REGISTRY.items()):
         if only is not None and name not in only:
+            continue
+        if name in CONFUSING_FOR_SMALL_MODELS:
             continue
         if not allow_risky and spec.risk == registry.RISKY:
             continue
@@ -130,9 +143,49 @@ grammar had no rule for what the user said. Two consequences:
   it and report the result.
 * Answer in one or two short sentences. Your reply may be read aloud.
 
+Use the typed tools, never a shell command, for anything they cover — opening an
+application, opening a URL, closing browser tabs, reading messages. There is a
+tool for each. Closing tabs is browser_close_all_tabs, never quit_app.
+
+Pass complete arguments. A URL must include its scheme and host
+("https://www.youtube.com/results?search_query=jazz"), never a fragment
+like "https:".
+
+Never call the same tool twice with the same arguments. If a call did not get you
+what you needed, change the arguments or choose a different tool. If two attempts
+have not worked, tell the user what you tried and stop.
+
 If no tool fits and you cannot answer from what you know, say so plainly in one
 sentence rather than guessing.
 """
+
+
+def suspicious_arguments(name: str, args: dict) -> str:
+    """Reject obviously broken arguments before they reach a tool.
+
+    A small model produces half-formed values under pressure — "https:" as a URL,
+    an empty application name. Catching them here and saying why is far more
+    useful than letting the tool fail and inviting the same call again.
+    """
+    spec = registry.REGISTRY.get(name)
+    if spec is None:
+        return ""
+    for key, value in args.items():
+        if not isinstance(value, str):
+            continue
+        node = spec.schema["properties"].get(key) or {}
+        text = value.strip()
+        if key == "url" or "url" in str(node.get("description", "")).lower():
+            if text and not re.match(r"^[a-z][a-z0-9+.-]*://[^/\s]+", text, re.IGNORECASE):
+                if not re.match(r"^(mailto|tel|facetime):\S+", text, re.IGNORECASE):
+                    return (
+                        f"{key}={value!r} is not a usable URL. Give the full "
+                        "address including scheme and host, for example "
+                        "https://www.youtube.com/results?search_query=jazz"
+                    )
+        if key in ("name", "app", "chat", "recipient") and not text:
+            return f"{key} was empty. Supply the actual value."
+    return ""
 
 
 class Brain:
@@ -165,6 +218,11 @@ class Brain:
     def ask(self, said: str, on_tool: Callable[[str, dict], None] | None = None) -> Reply:
         started = time.monotonic()
         reply = Reply()
+        # Signatures of calls already made, so an identical one is refused
+        # rather than executed again. This is what stopped the six-round
+        # quit_app / shell_check loops.
+        executed: set[str] = set()
+        refusals = 0
         self.messages.append({"role": "user", "content": said})
         memory.log_message("local-brain", "user", said)
 
@@ -214,6 +272,41 @@ class Brain:
                 if not isinstance(arguments, dict):
                     arguments = {}
 
+                signature = name + "|" + json.dumps(arguments, sort_keys=True, default=str)
+
+                if signature in executed:
+                    refusals += 1
+                    self.messages.append(
+                        {
+                            "role": "tool",
+                            "name": name,
+                            "content": (
+                                f"REFUSED: you already called {name} with exactly these "
+                                "arguments and its result is above. Repeating it cannot "
+                                "help. Either call a different tool, change the "
+                                "arguments, or answer the user now with what you have."
+                            ),
+                        }
+                    )
+                    if refusals >= 2:
+                        reply.error = (
+                            f"the local model kept repeating the same {name} call. "
+                            "It is not able to work this one out — try phrasing it as "
+                            "a direct command, or `jeeves local --list` for the "
+                            "phrasings handled without a model."
+                        )
+                        reply.duration_s = time.monotonic() - started
+                        return reply
+                    continue
+
+                complaint = suspicious_arguments(name, arguments)
+                if complaint:
+                    self.messages.append(
+                        {"role": "tool", "name": name, "content": "REJECTED: " + complaint}
+                    )
+                    continue
+
+                executed.add(signature)
                 reply.tools_used.append(name)
                 if on_tool is not None:
                     on_tool(name, arguments)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from pathlib import Path
 
 from ...mac import check_path, run, tell
@@ -35,17 +36,112 @@ def running_apps() -> list[str]:
     return sorted(names)
 
 
+# What people say, versus what the bundle is called. Nobody says
+# "Google Chrome" out loud, and `open -a chrome` fails.
+ALIASES = {
+    "chrome": "Google Chrome",
+    "google chrome": "Google Chrome",
+    "brave": "Brave Browser",
+    "edge": "Microsoft Edge",
+    "code": "Visual Studio Code",
+    "vscode": "Visual Studio Code",
+    "vs code": "Visual Studio Code",
+    "whatsapp": "WhatsApp",
+    "whats app": "WhatsApp",
+    "word": "Microsoft Word",
+    "excel": "Microsoft Excel",
+    "powerpoint": "Microsoft PowerPoint",
+    "outlook": "Microsoft Outlook",
+    "teams": "Microsoft Teams",
+    "vlc": "VLC",
+    "iterm": "iTerm",
+    "activity monitor": "Activity Monitor",
+    "system settings": "System Settings",
+    "preferences": "System Settings",
+    "system preferences": "System Settings",
+    "app store": "App Store",
+    "quicktime": "QuickTime Player",
+    "textedit": "TextEdit",
+    "text edit": "TextEdit",
+    "terminal": "Terminal",
+    "finder": "Finder",
+    "calendar": "Calendar",
+    "reminders": "Reminders",
+    "notes": "Notes",
+    "mail": "Mail",
+    "messages": "Messages",
+    "music": "Music",
+    "spotify": "Spotify",
+    "slack": "Slack",
+    "zoom": "zoom.us",
+    "xcode": "Xcode",
+    "photos": "Photos",
+    "safari": "Safari",
+    "chatgpt": "ChatGPT",
+    "docker": "Docker Desktop",
+    "postman": "Postman",
+}
+
+
 def resolve_app(name: str) -> str:
-    """Confirm an application exists, returning its canonical name."""
-    probe = run(["open", "-Ra", name])
-    if probe.ok:
-        return name
-    for candidate in running_apps():
-        if candidate.lower() == name.lower():
+    """Confirm an application exists, returning its canonical name.
+
+    Spoken names are resolved through ALIASES first, then tried directly, then
+    matched case-insensitively against what is running, then matched as a prefix
+    of an installed app.
+    """
+    wanted = " ".join(name.strip().split())
+    if not wanted:
+        raise ToolError("no application name was given")
+
+    canonical = ALIASES.get(wanted.lower())
+    if canonical and run(["open", "-Ra", canonical]).ok:
+        return canonical
+
+    if run(["open", "-Ra", wanted]).ok:
+        return wanted
+
+    running = running_apps()
+    for candidate in running:
+        if candidate.lower() == wanted.lower():
             return candidate
-    close = [a for a in running_apps() if name.lower() in a.lower()][:6]
-    hint = f" Running apps matching that: {', '.join(close)}." if close else ""
+
+    # "chrome" -> "Google Chrome": match a whole word inside an installed name.
+    installed = installed_apps()
+    lowered = wanted.lower()
+    exact = [a for a in installed if a.lower() == lowered]
+    if exact:
+        return exact[0]
+    worded = [a for a in installed if lowered in a.lower().split()]
+    if len(worded) == 1:
+        return worded[0]
+    partial = [a for a in installed if lowered in a.lower()]
+    if len(partial) == 1:
+        return partial[0]
+
+    options = partial or [a for a in running if lowered in a.lower()]
+    hint = f" Did you mean: {', '.join(sorted(options)[:6])}?" if options else ""
     raise ToolError(f"no application named {name!r} is installed.{hint}")
+
+
+@lru_cache(maxsize=1)
+def installed_apps() -> list[str]:
+    """Application names from the usual install locations."""
+    names: set[str] = set()
+    for folder in (
+        Path("/Applications"),
+        Path("/Applications/Utilities"),
+        Path("/System/Applications"),
+        Path("/System/Applications/Utilities"),
+        Path.home() / "Applications",
+    ):
+        try:
+            for entry in folder.iterdir():
+                if entry.suffix == ".app":
+                    names.add(entry.stem)
+        except OSError:
+            continue
+    return sorted(names)
 
 
 @tool("list_running_apps", "List the GUI applications that are currently running.", risk=READ)
