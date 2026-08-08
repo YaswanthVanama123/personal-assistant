@@ -1,0 +1,73 @@
+# Jeeves configuration.
+#
+# This file holds the project defaults. Anything you set in
+# ~/.config/jeeves/jeeves.toml overrides it, which is the better place for
+# personal settings — it survives updates to this repo.
+#
+# Every value here is the built-in default, so an empty file behaves identically.
+
+[agent]
+# Model to use. Empty means "whatever the claude CLI is configured to use".
+# Try "opus" for the sharpest results, "sonnet" for faster and cheaper.
+model = ""
+
+# How hard to think: low | medium | high | xhigh | max.
+# high is a good default; low is noticeably snappier for simple requests.
+effort = "high"
+
+# Give up on a single request after this many seconds.
+turn_timeout = 900
+
+# Where Jeeves starts from when you give it a relative path.
+# workdir = "/Users/you"
+
+# Extra folders Jeeves may read and write, beyond workdir.
+# extra_dirs = ["/Users/you/Documents", "/Users/you/Desktop", "/Users/you/Downloads"]
+
+[voice]
+# Empty uses the macOS system voice. Run `say -v '?'` for the full list.
+# Higher-quality voices: System Settings → Accessibility → Spoken Content →
+# System Voice → Manage Voices. An unavailable voice falls back to the default.
+tts_voice = ""
+
+# Words per minute for spoken replies. 190 is conversational; 240 is brisk.
+tts_rate = 190
+
+# Seconds of silence that end an utterance. Lower feels snappier but clips
+# people who pause mid-sentence.
+silence_timeout = 1.4
+
+# Read replies aloud in voice mode.
+speak = true
+
+# Spoken replies are trimmed to roughly this many characters. The full text is
+# still printed and returned.
+speak_limit = 700
+
+# Wake word, used by the menu-bar listener.
+wake_word = "jeeves"
+
+[server]
+# Bind address for `jeeves serve`. Keep this on 127.0.0.1 unless you genuinely
+# want other machines driving your Mac — the token is the only thing stopping
+# them.
+host = "127.0.0.1"
+port = 8787
+
+# Leave empty and a token is generated on first run and stored in
+# ~/.local/state/jeeves/api-token.
+token = ""
+
+[safety]
+# guarded — reads freely, safe reversible changes run immediately, outbound and
+#           destructive actions ask first. The recommended setting.
+# strict  — every change asks first.
+# open    — no confirmation gates. The hard deny list still applies.
+mode = "guarded"
+
+# Send deletions to the Trash rather than unlinking them.
+trash_not_delete = true
+
+# Extra paths Jeeves must never read or write. Credential stores, keychains and
+# SSH keys are already blocked and cannot be re-enabled here.
+# forbidden_paths = ["/Users/you/Documents/Taxes", "/Users/you/private"]

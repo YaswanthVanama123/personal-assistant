@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>            <string>local.jeeves.native</string>
+  <key>CFBundleName</key>                  <string>Jeeves</string>
+  <key>CFBundledisplayName</key>           <string>Jeeves</string>
+  <key>CFBundleShortVersionString</key>    <string>1.0.0</string>
+  <key>LSUIElement</key>                   <true/>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Jeeves listens to your voice commands and transcribes them on this Mac.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>Jeeves converts your spoken requests to text using on-device speech recognition.</string>
+  <key>NSCalendarsFullAccessUsageDescription</key>
+  <string>Jeeves reads your schedule and creates events when you ask it to.</string>
+  <key>NSRemindersFullAccessUsageDescription</key>
+  <string>Jeeves reads and creates reminders when you ask it to.</string>
+  <key>NSContactsUsageDescription</key>
+  <string>Jeeves looks up phone numbers and email addresses so it can message the right person.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Jeeves controls apps such as Notes, Mail and Music on your behalf.</string>
+</dict>
+</plist>
