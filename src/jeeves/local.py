@@ -30,10 +30,22 @@ import sys
 import time
 from dataclasses import dataclass, field
 from typing import Callable
+from urllib.parse import quote_plus
 
 from . import mac
 from .mcp import registry
 from .mcp import tools as _tools  # noqa: F401  (registers every tool)
+
+SITES = {
+    "youtube": "https://www.youtube.com",
+    "gmail": "https://mail.google.com",
+    "github": "https://github.com",
+    "twitter": "https://twitter.com",
+    "reddit": "https://www.reddit.com",
+    "maps": "https://maps.google.com",
+    "drive": "https://drive.google.com",
+    "calendar.google": "https://calendar.google.com",
+}
 
 NUMBER_WORDS = {
     "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
@@ -260,6 +272,49 @@ RULES: list[Rule] = [
         build=lambda m: {"minutes": to_number(m.group("minutes") or "", 60) or 60},
     ),
 
+    # ------------------------------------------------------------------- web
+    rule(
+        rf"^{P}(?:open\s+)?(?:youtube|you\s?tube)\s+(?:and\s+)?(?:search|play|look)"
+        r"(?:\s+(?:for|up))?\s+(?P<q>.+)$",
+        "open_url",
+        "youtube search lofi beats",
+        build=lambda m: {
+            "url": "https://www.youtube.com/results?search_query="
+            + quote_plus(m.group("q").strip())
+        },
+    ),
+    rule(
+        rf"^{P}(?:search|look\s+up)\s+(?:on\s+)?(?:youtube|you\s?tube)\s+"
+        r"(?:for\s+)?(?P<q>.+)$",
+        "open_url",
+        "search youtube for lofi beats",
+        build=lambda m: {
+            "url": "https://www.youtube.com/results?search_query="
+            + quote_plus(m.group("q").strip())
+        },
+    ),
+    rule(
+        rf"^{P}(?:google|search\s+(?:the\s+)?(?:web|google)\s+(?:for\s+)?)(?P<q>.+)$",
+        "open_url",
+        "google flight times to tokyo",
+        build=lambda m: {
+            "url": "https://www.google.com/search?q=" + quote_plus(m.group("q").strip())
+        },
+    ),
+    rule(
+        rf"^{P}open\s+(?:the\s+)?(?:website\s+|site\s+)?(?P<url>https?://\S+)$",
+        "open_url",
+        "open https://example.com",
+        build=_clean_groups,
+    ),
+    rule(
+        rf"^{P}(?:open|go\s+to)\s+(?P<site>youtube|gmail|github|twitter|reddit|"
+        r"maps|drive|calendar\.google)(?:\.com)?$",
+        "open_url",
+        "open youtube",
+        build=lambda m: {"url": SITES[m.group("site").lower()]},
+    ),
+
     # ------------------------------------------------------------------ apps
     rule(
         rf"^{P}(?:open|launch|start)\s+(?P<name>.+?)$",
@@ -355,6 +410,182 @@ RULES: list[Rule] = [
 ]
 
 
+
+# ---------------------------------------------------------------- normalising
+#
+# Speech does not arrive as canned phrases. People say "can you please open
+# WhatsApp", "what is the date today", "what's the time now" — filler and
+# politeness wrapped around an intent the table already has. Rather than writing
+# a rule per phrasing, each utterance is reduced through a series of
+# progressively more aggressive rewrites, and every rule is tried against each
+# variant until one matches.
+#
+# This is not understanding. It is normalisation, and it has a ceiling: a request
+# whose *meaning* is not in the table will still miss. But it turns dozens of
+# near-misses into hits.
+
+# Politeness and hedging that carries no meaning, stripped from the front.
+LEADING_NOISE = (
+    "can you please", "could you please", "would you please", "can you", "could you",
+    "would you", "will you", "please", "kindly", "i want you to", "i need you to",
+    "i would like you to", "hey jeeves", "hi jeeves", "ok jeeves", "okay jeeves",
+    "jeeves", "hey", "guess", "um", "uh", "so", "just", "now",
+)
+
+# Trailing words that do not change which tool is wanted.
+TRAILING_NOISE = (
+    "please", "for me", "right now", "now", "today", "thanks", "thank you",
+    "will you", "would you", "ok", "okay",
+)
+
+# Both directions, because speech-to-text is inconsistent about contractions.
+CONTRACTIONS = {
+    "what is": "what's", "what has": "what's", "that is": "that's",
+    "it is": "it's", "let us": "let's", "do not": "don't",
+    "cannot": "can not", "i am": "i'm", "i will": "i'll", "i would": "i'd",
+    "who is": "who's", "when is": "when's", "where is": "where's",
+    "how is": "how's", "there is": "there's",
+}
+EXPANSIONS = {v: k for k, v in CONTRACTIONS.items()}
+
+# Transcription frequently drops apostrophes. Deliberately excludes "its",
+# "ill" and "id", which are real words that would be mangled.
+APOSTROPHES = {
+    "whats": "what's", "wheres": "where's", "hows": "how's", "thats": "that's",
+    "lets": "let's", "dont": "don't", "im": "i'm", "whos": "who's",
+    "whens": "when's", "theres": "there's", "youre": "you're", "cant": "can't",
+}
+
+# Words people use interchangeably for the same intent.
+SYNONYMS = {
+    "the time": "what time is it",
+    "what's the time": "what time is it",
+    "time now": "what time is it",
+    "current time": "what time is it",
+    "what's today's date": "what's the date",
+    "today's date": "what's the date",
+    "what day is today": "what's the date",
+    "launch": "open",
+    "start up": "open",
+    "bring up": "open",
+    "shut": "quit",
+    "close down": "quit",
+    "text messages": "messages",
+    "whats app": "whatsapp",
+    "whatsup": "whatsapp",
+    "whats up": "whatsapp",
+}
+
+
+# Case is preserved throughout: a contact name, an app name or the body of a
+# message all travel through these rewrites, and lowercasing them would send
+# "on my way" to "sarah" instead of "Sarah". Only the function words being
+# rewritten are matched case-insensitively.
+
+
+def _strip_edges(text: str) -> str:
+    changed = True
+    while changed:
+        changed = False
+        lowered = text.lower()
+        for phrase in LEADING_NOISE:
+            if lowered == phrase:
+                continue
+            if lowered.startswith(phrase + " "):
+                text = text[len(phrase) + 1:]
+                lowered = text.lower()
+                changed = True
+        for phrase in TRAILING_NOISE:
+            if lowered == phrase:
+                continue
+            if lowered.endswith(" " + phrase):
+                text = text[: -(len(phrase) + 1)]
+                lowered = text.lower()
+                changed = True
+    return text.strip()
+
+
+def _swap(text: str, table: dict[str, str]) -> str:
+    for source, target in table.items():
+        text = re.sub(rf"\b{re.escape(source)}\b", target, text, flags=re.IGNORECASE)
+    return text
+
+
+def variants(said: str) -> list[str]:
+    """Progressively normalised forms of an utterance, most literal first."""
+    base = " ".join(said.strip().split()).strip(" .!?,")
+    seen: list[str] = []
+
+    def add(candidate: str) -> None:
+        candidate = " ".join(candidate.split()).strip()
+        if candidate and candidate not in seen:
+            seen.append(candidate)
+
+    add(base)
+    base = _swap(base, APOSTROPHES)
+    add(base)
+    add(_swap(base, SYNONYMS))
+    add(_swap(base, CONTRACTIONS))
+    add(_swap(base, EXPANSIONS))
+    stripped = _strip_edges(base)
+    add(stripped)
+    add(_swap(stripped, SYNONYMS))
+    add(_swap(stripped, CONTRACTIONS))
+    add(_swap(stripped, EXPANSIONS))
+    add(_strip_edges(_swap(_swap(base, SYNONYMS), CONTRACTIONS)))
+    add(_strip_edges(_swap(_swap(base, SYNONYMS), EXPANSIONS)))
+    return seen
+
+
+# Words too common to identify an intent.
+STOPWORDS = frozenset(
+    "a an the my your is it to of for on in at do does what which that this "
+    "and or me you i we are was be been being have has had can could would "
+    "will shall should please now today there here how".split()
+)
+
+
+def _significant(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z']+", text.lower()) if w not in STOPWORDS and len(w) > 1}
+
+
+def _keyword_match(text: str) -> Rule | None:
+    """Last resort for intents that take no arguments.
+
+    Rules with capture groups are excluded: a fuzzy match cannot tell us what to
+    put in the slot, and guessing a recipient or a filename would be worse than
+    admitting defeat.
+    """
+    wanted = _significant(text)
+    if not wanted:
+        return None
+
+    scored: list[tuple[float, Rule]] = []
+    for entry in RULES:
+        if entry.pattern.groupindex:
+            continue
+        keys = _significant(entry.example)
+        if not keys:
+            continue
+        overlap = len(wanted & keys)
+        if not overlap:
+            continue
+        # Reward covering the rule's keywords; penalise unexplained extra words.
+        score = overlap / len(keys) - 0.12 * len(wanted - keys)
+        scored.append((score, entry))
+
+    if not scored:
+        return None
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    best, runner_up = scored[0], scored[1] if len(scored) > 1 else None
+    if best[0] < 0.55:
+        return None
+    # Ambiguous between two intents: better to ask than to guess wrong.
+    if runner_up is not None and best[0] - runner_up[0] < 0.15:
+        return None
+    return best[1]
+
+
 @dataclass
 class Outcome:
     matched: bool
@@ -377,14 +608,24 @@ def normalise(said: str) -> str:
 
 
 def match_rule(said: str) -> tuple[Rule, re.Match[str]] | None:
-    """First rule that matches, with no side effects. The unit of testing."""
-    text = normalise(said)
-    if not text:
+    """First rule that matches any normalised form. No side effects.
+
+    Tries each variant in turn, most literal first, so an exact phrasing always
+    wins over a rewritten one. Falls back to keyword scoring for argument-free
+    intents.
+    """
+    if not normalise(said):
         return None
-    for entry in RULES:
-        found = entry.pattern.match(text)
-        if found is not None:
-            return entry, found
+    for candidate in variants(said):
+        for entry in RULES:
+            found = entry.pattern.match(candidate)
+            if found is not None:
+                return entry, found
+
+    entry = _keyword_match(normalise(said))
+    if entry is not None:
+        # Synthesise an empty match; these rules take no arguments by definition.
+        return entry, re.match(r"", "")
     return None
 
 

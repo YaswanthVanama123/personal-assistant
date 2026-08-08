@@ -99,6 +99,43 @@ CASES: list[tuple[str, str, dict]] = [
     # Answered in Python, no tool
     ("what time is it", "", {}),
     ("what's the date", "", {}),
+
+    # ---- natural phrasing: filler, politeness, missing apostrophes ----
+    # Every one of these was a real miss reported from voice mode.
+    ("Guess what time is it", "", {}),
+    ("whats the time", "", {}),
+    ("What's the time now", "", {}),
+    ("What is the date today", "", {}),
+    ("Whats the date", "", {}),
+    ("Can you please open WhatsApp", "whatsapp_unread", {}),
+    ("could you please read my messages", "whatsapp_unread", {}),
+    ("hey jeeves whats my battery", "battery", {}),
+    ("I want you to open Music", "open_app", {"name": "Music"}),
+    ("please mute", "volume_mute", {"muted": True}),
+    ("launch Safari", "open_app", {"name": "Safari"}),
+    ("check whats app", "whatsapp_unread", {}),
+    ("what is on tomorrow", "calendar_agenda", {"days": 2}),
+    ("turn it up", "volume_set", {"level": -1}),
+    ("kindly what is my wifi status", "wifi_status", {}),
+    # Case must survive normalisation — names and message bodies depend on it.
+    ("Can you please reply to Sarah: On My Way", "whatsapp_send",
+     {"chat": "Sarah", "text": "On My Way"}),
+    ("please tell Priya I am running late", "whatsapp_send",
+     {"chat": "Priya", "text": "I am running late"}),
+
+    # ---- web ----
+    ("open youtube and search for lofi beats", "open_url",
+     {"url": "https://www.youtube.com/results?search_query=lofi+beats"}),
+    ("search youtube for python tutorial", "open_url",
+     {"url": "https://www.youtube.com/results?search_query=python+tutorial"}),
+    ("open youtube", "open_url", {"url": "https://www.youtube.com"}),
+    ("open gmail", "open_url", {"url": "https://mail.google.com"}),
+    ("google weather in bangalore", "open_url",
+     {"url": "https://www.google.com/search?q=weather+in+bangalore"}),
+    ("open https://apple.com", "open_url", {"url": "https://apple.com"}),
+    # Plain app opening must still beat the web rules.
+    ("open Safari", "open_app", {"name": "Safari"}),
+    ("quit Safari", "quit_app", {"name": "Safari"}),
 ]
 
 failures: list[str] = []
@@ -133,6 +170,21 @@ for nonsense in ["", "   ", "asdfghjkl", "!!!", "tell", "reply to"]:
 suggestion = local.interpret("sarah message lunch").text
 if "don't have a rule" not in suggestion:
     failures.append("  near-miss input did not produce a suggestion")
+
+# Genuinely meaningless input must still be refused rather than guessed at.
+for vague in [
+    "what are the conditions currently now you have",
+    "do the thing with the stuff",
+]:
+    if local.parse(vague) is not None:
+        failures.append(f"  {vague!r} should not have matched any rule")
+
+# Normalisation must not mangle a slot value's case.
+parsed = local.parse("reply to McDonald: See You At The Café")
+if parsed is None or parsed[1].get("chat") != "McDonald":
+    failures.append(f"  case lost in chat slot: {parsed}")
+if parsed and parsed[1].get("text") != "See You At The Café":
+    failures.append(f"  case lost in text slot: {parsed[1].get('text')!r}")
 
 # Model-directed text must be stripped from human-facing confirmations.
 sample = (

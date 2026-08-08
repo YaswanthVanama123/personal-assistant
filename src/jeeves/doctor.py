@@ -298,7 +298,7 @@ def check_permissions(r: Report) -> None:
         if result.code == 77:
             r.warn(
                 f"{label} is not granted",
-                f"Enable jeeves-native (or your terminal) under {PRIVACY} → {pane}.",
+                f"Enable “Jeeves” under {PRIVACY} → {pane}.",
             )
         elif result.ok:
             r.ok(label, "readable")

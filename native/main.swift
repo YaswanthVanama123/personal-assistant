@@ -25,6 +25,7 @@ import Vision
 // MARK: - Plumbing
 
 func fail(_ message: String, code: Int32 = 1) -> Never {
+    appExitCode = code  // picked up by writeExitMarker in the app instance
     FileHandle.standardError.write(("jeeves-native: " + message + "\n").data(using: .utf8)!)
     exit(code)
 }
@@ -525,6 +526,36 @@ func runListenAsApp(silence: TimeInterval, timeout: TimeInterval, outputPath: St
     exit(0)
 }
 
+// ---------------------------------------------------------------------------
+// Delegating TCC-protected work to the app instance.
+//
+// Every privacy-protected service has the same problem as Speech Recognition:
+// run from a shell, the request is attributed to the terminal, so grants attach
+// to Terminal — or VS Code, or iTerm — instead of to Jeeves, and break the
+// moment you switch terminal. Routing these commands through the app bundle via
+// LaunchServices makes Jeeves its own responsible process, so each permission is
+// granted once, to "Jeeves", and works from anywhere.
+let TCC_DELEGATED: Set<String> = [
+    "listen",
+    "events", "add-event",
+    "reminders", "add-reminder", "complete-reminder",
+    "contacts",
+    "ui-dump", "ui-type",
+    "wa-chats", "wa-unread", "wa-read", "wa-send",
+]
+
+/// Set in the app instance; nil in the CLI. Names the result file prefix.
+var resultPrefix: String?
+/// Exit status the app instance will report. `fail()` updates it.
+var appExitCode: Int32 = 0
+
+/// Written last, so the CLI knows stdout and stderr are complete.
+func writeExitMarker() {
+    guard let prefix = resultPrefix else { return }
+    try? String(appExitCode).write(
+        toFile: prefix + ".code", atomically: true, encoding: .utf8)
+}
+
 /// Where the CLI leaves a request for the app instance to pick up.
 ///
 /// LaunchServices does not forward `open --args` to the process in a way we can
@@ -537,6 +568,64 @@ let listenRequestPath: String = {
         atPath: dir, withIntermediateDirectories: true)
     return dir + "/listen-request.json"
 }()
+
+/// Run a command inside the app bundle and replay its output here.
+func delegateToApp(_ command: String, _ rest: [String], timeout: TimeInterval) -> Never {
+    let bundle = Bundle.main.bundlePath
+    guard bundle.hasSuffix(".app") else {
+        fail(
+            "the helper is not running from Jeeves.app, so macOS cannot attribute "
+            + "privacy prompts to it. Re-run scripts/build_native.sh.",
+            code: 79
+        )
+    }
+
+    let prefix = NSTemporaryDirectory()
+        + "jeeves-\(command)-\(getpid())-\(Int(Date().timeIntervalSince1970))"
+    for suffix in [".out", ".err", ".code"] {
+        try? FileManager.default.removeItem(atPath: prefix + suffix)
+    }
+
+    let request: [String: Any] = ["command": command, "args": rest, "prefix": prefix]
+    guard let data = try? JSONSerialization.data(withJSONObject: request) else {
+        fail("could not build the request", code: 79)
+    }
+    try? data.write(to: URL(fileURLWithPath: listenRequestPath))
+
+    let open = Process()
+    open.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+    open.arguments = ["-n", "-a", bundle]
+    do { try open.run() } catch {
+        fail("could not launch \(bundle): \(error.localizedDescription)", code: 79)
+    }
+    open.waitUntilExit()
+
+    // The app may be showing a permission dialog, so wait generously.
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if let codeText = try? String(contentsOfFile: prefix + ".code", encoding: .utf8),
+           let code = Int32(codeText.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            if let out = try? String(contentsOfFile: prefix + ".out", encoding: .utf8),
+               !out.isEmpty {
+                FileHandle.standardOutput.write(out.data(using: .utf8)!)
+            }
+            if let err = try? String(contentsOfFile: prefix + ".err", encoding: .utf8),
+               !err.isEmpty {
+                FileHandle.standardError.write(err.data(using: .utf8)!)
+            }
+            for suffix in [".out", ".err", ".code"] {
+                try? FileManager.default.removeItem(atPath: prefix + suffix)
+            }
+            exit(code)
+        }
+        Thread.sleep(forTimeInterval: 0.12)
+    }
+    fail(
+        "Jeeves.app did not report back within \(Int(timeout))s. If a permission "
+        + "dialog appeared, approve it and run this again — the grant is remembered.",
+        code: 78
+    )
+}
 
 /// Relaunch through LaunchServices and wait for the transcript.
 ///
@@ -599,13 +688,44 @@ func listenViaLaunchServices(silence: TimeInterval, timeout: TimeInterval) -> Ne
 }
 
 /// Read the request the CLI left for us. Nil when launched without one.
-func pendingListenRequest() -> (out: String, silence: TimeInterval, timeout: TimeInterval)? {
+func pendingRequest() -> (command: String, args: [String], prefix: String)? {
     guard let data = FileManager.default.contents(atPath: listenRequestPath),
           let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-          let out = parsed["out"] as? String
+          let command = parsed["command"] as? String,
+          let prefix = parsed["prefix"] as? String
     else { return nil }
     try? FileManager.default.removeItem(atPath: listenRequestPath)  // one-shot
-    return (out, parsed["silence"] as? Double ?? 1.4, parsed["timeout"] as? Double ?? 30)
+    return (command, parsed["args"] as? [String] ?? [], prefix)
+}
+
+/// Run a delegated command in the app instance, capturing output for the CLI.
+func serveRequest(_ request: (command: String, args: [String], prefix: String)) -> Never {
+    resultPrefix = request.prefix
+    atexit(writeExitMarker)
+    // A LaunchServices process has no terminal; send output to files instead.
+    freopen(request.prefix + ".out", "w", stdout)
+    freopen(request.prefix + ".err", "w", stderr)
+
+    if request.command == "listen" {
+        var silence = 1.4
+        var timeout = 30.0
+        for (i, a) in request.args.enumerated() {
+            if a == "--silence", i + 1 < request.args.count {
+                silence = Double(request.args[i + 1]) ?? silence
+            }
+            if a == "--timeout", i + 1 < request.args.count {
+                timeout = Double(request.args[i + 1]) ?? timeout
+            }
+        }
+        runListenAsApp(silence: silence, timeout: timeout, outputPath: nil)
+    }
+
+    // Everything else needs a run loop for prompts, so dispatch on a thread.
+    DispatchQueue.global(qos: .userInitiated).async {
+        dispatch(request.command, request.args)
+    }
+    RunLoop.main.run()
+    exit(appExitCode)
 }
 
 // MARK: - Brightness
@@ -937,9 +1057,9 @@ func runMenuBar(cli: String) -> Never {
 
 let args = Array(CommandLine.arguments.dropFirst())
 
-// Launched by LaunchServices with no arguments: pick up the request the CLI left.
-if args.isEmpty, let pending = pendingListenRequest() {
-    runListenAsApp(silence: pending.silence, timeout: pending.timeout, outputPath: pending.out)
+// Launched by LaunchServices with no arguments: run the request the CLI left.
+if args.isEmpty, let pending = pendingRequest() {
+    serveRequest(pending)
 }
 
 guard let command = args.first else {
@@ -1030,25 +1150,19 @@ func dispatch(_ command: String, _ rest: [String]) -> Never {
 // Speech Recognition is TCC-protected, so this command has to be its own
 // responsible process and needs a real NSApplication. Both are set up here,
 // before the generic background dispatch below.
-if command == "listen" {
-    var silence = 1.4
-    var timeout = 30.0
-    var output: String?
-    for (i, a) in rest.enumerated() {
-        if a == "--silence", i + 1 < rest.count { silence = Double(rest[i + 1]) ?? silence }
-        if a == "--timeout", i + 1 < rest.count { timeout = Double(rest[i + 1]) ?? timeout }
-        if a == "--out", i + 1 < rest.count { output = rest[i + 1] }
+// Protected commands run inside the app bundle so that permissions are granted
+// to "Jeeves" once, rather than to whichever terminal happens to be in use.
+// JEEVES_NO_DELEGATE=1 forces inline execution, for debugging.
+if TCC_DELEGATED.contains(command),
+   responsiblePID() != getpid(),
+   ProcessInfo.processInfo.environment["JEEVES_NO_DELEGATE"] == nil {
+    var budget: TimeInterval = 150
+    if command == "listen" {
+        for (i, a) in rest.enumerated() where a == "--timeout" && i + 1 < rest.count {
+            budget = (Double(rest[i + 1]) ?? 30) + 120
+        }
     }
-
-    if output != nil {
-        // Launched by LaunchServices: we are the application instance.
-        runListenAsApp(silence: silence, timeout: timeout, outputPath: output)
-    }
-    if responsiblePID() == getpid() {
-        // Already our own responsible process, so no relaunch is needed.
-        runListenAsApp(silence: silence, timeout: timeout, outputPath: nil)
-    }
-    listenViaLaunchServices(silence: silence, timeout: timeout)
+    delegateToApp(command, rest, timeout: budget)
 }
 
 if command == "bar" {

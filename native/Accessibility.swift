@@ -70,7 +70,7 @@ func requireAccessibility() {
     guard AXIsProcessTrusted() else {
         fail(
             "Accessibility permission is required to read other apps' windows. "
-            + "Grant it to jeeves-native (or your terminal) under System Settings → "
+            + "Grant it to “Jeeves” under System Settings → "
             + "Privacy & Security → Accessibility, then try again.",
             code: 77
         )
